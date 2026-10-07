@@ -99,9 +99,23 @@ def sol_balance(address):
     return rpc(SOL_RPC, "getBalance", [address])["value"] / 1e9
 
 
+TRON_RETRIES = 4  # TronGrid tanpa API key cepat membalas 429 Too Many Requests
+
+
 def tron_account(address):
-    data = http_json(TRON_API.format(address))["data"]
-    return data[0] if data else {}
+    for attempt in range(TRON_RETRIES + 1):
+        try:
+            data = http_json(TRON_API.format(address))["data"]
+            return data[0] if data else {}
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt == TRON_RETRIES:
+                raise
+            # Ikuti Retry-After jika ada, selain itu backoff 2s, 4s, 8s, 16s
+            retry_after = exc.headers.get("Retry-After", "")
+            wait = min(float(retry_after), 30) if retry_after.isdigit() else 2 ** (attempt + 1)
+            print(f"[info] TronGrid 429, coba lagi dalam {wait:.0f}s ({attempt + 1}/{TRON_RETRIES})",
+                  file=sys.stderr)
+            time.sleep(wait)
 
 
 def tron_balance(address):
@@ -227,7 +241,7 @@ def print_table(rows, prices):
 
 # --- Notifikasi Telegram --------------------------------------------------
 
-def send_telegram(text):
+def send_telegram(text, preview=True):
     """Kirim pesan jika TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID di-set."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -238,7 +252,10 @@ def send_telegram(text):
               "(lihat README bagian Notifikasi Telegram)", file=sys.stderr)
         return
     try:
-        http_json(f"https://api.telegram.org/bot{token}/sendMessage", {"chat_id": chat_id, "text": text})
+        payload = {"chat_id": chat_id, "text": text}
+        if not preview:
+            payload["link_preview_options"] = {"is_disabled": True}
+        http_json(f"https://api.telegram.org/bot{token}/sendMessage", payload)
     except urllib.error.HTTPError as exc:
         try:
             reason = json.load(exc).get("description", exc)
