@@ -2,32 +2,67 @@
 """Pelacak wallet crypto besar (whale) di dunia dan Indonesia.
 
 Tanpa dependensi eksternal, tanpa API key:
-  - Saldo BTC   : mempool.space
-  - Saldo ETH   : RPC publik Ethereum (publicnode)
+  - BTC          : mempool.space
+  - ETH / BSC    : RPC publik (publicnode)
+  - Solana       : RPC publik Solana
+  - Tron         : TronGrid
   - Harga USD/IDR: CoinGecko
 
 Contoh:
   python3 tracker.py balances                 # semua grup
-  python3 tracker.py balances --group indonesia
-  python3 tracker.py watch --interval 300 --min-change 10
+  python3 tracker.py --group indonesia balances
+  python3 tracker.py watch --interval 300 --min-usd 1000000
 """
 
 import argparse
 import json
+import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_WALLETS = BASE_DIR / "wallets.json"
 DEFAULT_STATE = BASE_DIR / "state.json"
+USER_AGENT = "trackingwallet/1.0"
 
 BTC_API = "https://mempool.space/api/address/{}"
-ETH_RPC = "https://ethereum-rpc.publicnode.com"
-PRICE_API = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd,idr"
-COINGECKO_IDS = {"btc": "bitcoin", "eth": "ethereum"}
-USER_AGENT = "trackingwallet/1.0"
+EVM_RPC = {
+    "eth": "https://ethereum-rpc.publicnode.com",
+    "bsc": "https://bsc-rpc.publicnode.com",
+}
+SOL_RPC = "https://api.mainnet-beta.solana.com"
+TRON_API = "https://api.trongrid.io/v1/accounts/{}"
+PRICE_API = "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd,idr"
+
+# Koin native tiap chain: (simbol, id CoinGecko)
+NATIVE = {
+    "btc": ("BTC", "bitcoin"),
+    "eth": ("ETH", "ethereum"),
+    "bsc": ("BNB", "binancecoin"),
+    "sol": ("SOL", "solana"),
+    "tron": ("TRX", "tron"),
+}
+
+# Token yang didukung per chain: simbol -> (kontrak/mint, desimal, id CoinGecko)
+TOKENS = {
+    "eth": {
+        "USDT": ("0xdAC17F958D2ee523a2206206994597C13D831ec7", 6, "tether"),
+        "USDC": ("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6, "usd-coin"),
+    },
+    "bsc": {
+        "USDT": ("0x55d398326f99059fF775485246999027B3197955", 18, "tether"),
+    },
+    "sol": {
+        "USDT": ("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", 6, "tether"),
+        "USDC": ("EPjFWdd5AufqALUtJjDcoXzmYbcixMHCPXYeqNfdi36", 6, "usd-coin"),
+    },
+    "tron": {
+        "USDT": ("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", 6, "tether"),
+    },
+}
 
 
 def http_json(url, payload=None, timeout=20):
@@ -36,6 +71,15 @@ def http_json(url, payload=None, timeout=20):
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
 
+
+def rpc(url, method, params):
+    result = http_json(url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+    if "error" in result:
+        raise RuntimeError(result["error"].get("message", result["error"]))
+    return result["result"]
+
+
+# --- Saldo native ---------------------------------------------------------
 
 def btc_balance(address):
     stats = http_json(BTC_API.format(address))
@@ -46,20 +90,75 @@ def btc_balance(address):
     return sats / 1e8
 
 
-def eth_balance(address):
-    payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [address, "latest"]}
-    result = http_json(ETH_RPC, payload)
-    if "error" in result:
-        raise RuntimeError(result["error"].get("message", result["error"]))
-    return int(result["result"], 16) / 1e18
+def evm_balance(chain, address):
+    return int(rpc(EVM_RPC[chain], "eth_getBalance", [address, "latest"]), 16) / 1e18
 
 
-BALANCE_FETCHERS = {"btc": btc_balance, "eth": eth_balance}
+def sol_balance(address):
+    return rpc(SOL_RPC, "getBalance", [address])["value"] / 1e9
 
+
+def tron_account(address):
+    data = http_json(TRON_API.format(address))["data"]
+    return data[0] if data else {}
+
+
+def tron_balance(address):
+    return tron_account(address).get("balance", 0) / 1e6
+
+
+def native_balance(chain, address):
+    if chain == "btc":
+        return btc_balance(address)
+    if chain in EVM_RPC:
+        return evm_balance(chain, address)
+    if chain == "sol":
+        return sol_balance(address)
+    if chain == "tron":
+        return tron_balance(address)
+    raise ValueError(f"chain tidak didukung: {chain}")
+
+
+# --- Saldo token ----------------------------------------------------------
+
+def evm_token_balance(chain, address, contract, decimals):
+    data = "0x70a08231" + address.lower().removeprefix("0x").rjust(64, "0")  # balanceOf(address)
+    raw = rpc(EVM_RPC[chain], "eth_call", [{"to": contract, "data": data}, "latest"])
+    return int(raw, 16) / 10 ** decimals if raw not in ("0x", None) else 0.0
+
+
+def sol_token_balance(address, mint):
+    res = rpc(SOL_RPC, "getTokenAccountsByOwner", [address, {"mint": mint}, {"encoding": "jsonParsed"}])
+    total = 0.0
+    for acc in res["value"]:
+        total += float(acc["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmountString"])
+    return total
+
+
+def tron_token_balance(address, contract, decimals):
+    for entry in tron_account(address).get("trc20", []):
+        if contract in entry:
+            return int(entry[contract]) / 10 ** decimals
+    return 0.0
+
+
+def token_balance(chain, address, symbol):
+    contract, decimals, _ = TOKENS[chain][symbol]
+    if chain in EVM_RPC:
+        return evm_token_balance(chain, address, contract, decimals)
+    if chain == "sol":
+        return sol_token_balance(address, contract)
+    if chain == "tron":
+        return tron_token_balance(address, contract, decimals)
+    raise ValueError(f"token tidak didukung di chain {chain}")
+
+
+# --- Harga & daftar wallet ------------------------------------------------
 
 def fetch_prices():
+    ids = {cg for _, cg in NATIVE.values()} | {t[2] for toks in TOKENS.values() for t in toks.values()}
     try:
-        return http_json(PRICE_API)
+        return http_json(PRICE_API.format(urllib.parse.quote(",".join(sorted(ids)))))
     except Exception as exc:  # harga opsional; saldo tetap ditampilkan
         print(f"[peringatan] gagal mengambil harga: {exc}", file=sys.stderr)
         return {}
@@ -75,22 +174,36 @@ def load_wallets(path, group):
         for w in data[g]:
             if not w.get("address"):
                 continue  # placeholder yang belum diisi
-            if w["chain"] not in BALANCE_FETCHERS:
+            if w["chain"] not in NATIVE:
                 print(f"[peringatan] chain '{w['chain']}' belum didukung: {w['name']}", file=sys.stderr)
                 continue
+            for t in w.get("tokens", []):
+                if t not in TOKENS.get(w["chain"], {}):
+                    print(f"[peringatan] token '{t}' belum didukung di {w['chain']}: {w['name']}", file=sys.stderr)
             wallets.append({**w, "group": g})
     return wallets
 
 
 def snapshot(wallets):
+    """Satu baris per (wallet, aset): koin native + token yang diminta."""
     rows = []
     for w in wallets:
-        try:
-            bal = BALANCE_FETCHERS[w["chain"]](w["address"])
-            rows.append({**w, "balance": bal})
-        except Exception as exc:
-            print(f"[error] {w['name']}: {exc}", file=sys.stderr)
+        symbol, cg_id = NATIVE[w["chain"]]
+        assets = [(symbol, cg_id, lambda w=w: native_balance(w["chain"], w["address"]))]
+        for t in w.get("tokens", []):
+            if t in TOKENS.get(w["chain"], {}):
+                assets.append((t, TOKENS[w["chain"]][t][2],
+                               lambda w=w, t=t: token_balance(w["chain"], w["address"], t)))
+        for sym, cg, fetch in assets:
+            try:
+                rows.append({**w, "asset": sym, "price_id": cg, "balance": fetch()})
+            except Exception as exc:
+                print(f"[error] {w['name']} ({sym}): {exc}", file=sys.stderr)
     return rows
+
+
+def value_of(row, prices, currency):
+    return row["balance"] * prices.get(row["price_id"], {}).get(currency, 0)
 
 
 def fmt_money(value, currency):
@@ -101,20 +214,31 @@ def fmt_money(value, currency):
 
 def print_table(rows, prices):
     rows = sorted(rows, key=lambda r: value_of(r, prices, "usd"), reverse=True)
-    header = f"{'GRUP':<10} {'NAMA':<34} {'SALDO':>22} {'USD':>18} {'IDR':>26}"
+    header = f"{'GRUP':<10} {'NAMA':<34} {'SALDO':>24} {'USD':>18} {'IDR':>26}"
     print(header)
     print("-" * len(header))
     for r in rows:
-        bal = f"{r['balance']:,.4f} {r['chain'].upper()}"
+        bal = f"{r['balance']:,.4f} {r['asset']}"
         usd = fmt_money(value_of(r, prices, "usd"), "usd") if prices else "-"
         idr = fmt_money(value_of(r, prices, "idr"), "idr") if prices else "-"
-        print(f"{r['group']:<10} {r['name'][:34]:<34} {bal:>22} {usd:>18} {idr:>26}")
+        print(f"{r['group']:<10} {r['name'][:34]:<34} {bal:>24} {usd:>18} {idr:>26}")
 
 
-def value_of(row, prices, currency):
-    price = prices.get(COINGECKO_IDS[row["chain"]], {}).get(currency, 0)
-    return row["balance"] * price
+# --- Notifikasi Telegram --------------------------------------------------
 
+def send_telegram(text):
+    """Kirim pesan jika TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID di-set."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+    try:
+        http_json(f"https://api.telegram.org/bot{token}/sendMessage", {"chat_id": chat_id, "text": text})
+    except Exception as exc:
+        print(f"[peringatan] gagal kirim Telegram: {exc}", file=sys.stderr)
+
+
+# --- Perintah -------------------------------------------------------------
 
 def cmd_balances(args):
     wallets = load_wallets(args.wallets, args.group)
@@ -134,19 +258,28 @@ def cmd_watch(args):
         sys.exit("Tidak ada wallet dengan alamat terisi.")
     state_path = Path(args.state)
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    telegram = bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
     print(f"Memantau {len(wallets)} wallet tiap {args.interval}s "
-          f"(alert jika perubahan >= {args.min_change} koin). Ctrl+C untuk berhenti.")
+          f"(alert jika perubahan >= ${args.min_usd:,.0f}; Telegram {'aktif' if telegram else 'nonaktif'}). "
+          "Ctrl+C untuk berhenti.")
     while True:
-        for r in snapshot(wallets):
-            key = f"{r['chain']}:{r['address']}"
+        rows = snapshot(wallets)
+        prices = fetch_prices()
+        for r in rows:
+            key = f"{r['chain']}:{r['address']}:{r['asset']}"
             prev = state.get(key)
             if prev is not None:
                 diff = r["balance"] - prev
-                if abs(diff) >= args.min_change:
+                diff_usd = abs(value_of({**r, "balance": diff}, prices, "usd"))
+                # Tanpa data harga, alert untuk setiap perubahan
+                if diff != 0 and (not prices or diff_usd >= args.min_usd):
                     arah = "MASUK" if diff > 0 else "KELUAR"
                     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"[{ts}] {arah} {abs(diff):,.4f} {r['chain'].upper()} | {r['name']} "
-                          f"| saldo {prev:,.4f} -> {r['balance']:,.4f}", flush=True)
+                    nilai = f" (~{fmt_money(diff_usd, 'usd')})" if prices else ""
+                    msg = (f"{arah} {abs(diff):,.4f} {r['asset']}{nilai} | {r['name']} "
+                           f"| saldo {prev:,.4f} -> {r['balance']:,.4f}")
+                    print(f"[{ts}] {msg}", flush=True)
+                    send_telegram(f"🐋 [{r['group']}] {msg}")
             state[key] = r["balance"]
         state_path.write_text(json.dumps(state, indent=2))
         if args.once:
@@ -166,7 +299,7 @@ def main():
 
     w = sub.add_parser("watch", help="pantau perubahan saldo secara berkala")
     w.add_argument("--interval", type=int, default=300, help="detik antar pengecekan (default 300)")
-    w.add_argument("--min-change", type=float, default=1.0, help="minimal perubahan koin untuk alert")
+    w.add_argument("--min-usd", type=float, default=1_000_000, help="minimal perubahan (USD) untuk alert")
     w.add_argument("--state", default=str(DEFAULT_STATE), help="file penyimpanan saldo terakhir")
     w.add_argument("--once", action="store_true", help="cek sekali lalu keluar (untuk cron)")
     w.set_defaults(func=cmd_watch)
