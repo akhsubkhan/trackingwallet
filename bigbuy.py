@@ -8,6 +8,8 @@ Cara kerja (tanpa API key, RPC publik):
   3. Receipt transaksi dicek: harus ada event Swap dari pool tersebut, dan pengirim
      transaksi harus menerima token itu (menyaring add liquidity, arbitrase, bot MEV).
   4. four.meme (BSC): event TokenPurchase dari bonding curve.
+  5. Rekam jejak: setiap pembelian dicatat; harga token dipantau dari pool on-chain
+     selama 7 hari, lalu alert menampilkan berapa token pilihan wallet itu yang naik.
 
 Contoh:
   python3 bigbuy.py --min-usd 10000                 # BSC + ETH, terus-menerus
@@ -25,7 +27,7 @@ from pathlib import Path
 from bandar import (EXPLORER, EXPLORER_TX, FM_BUY, FOURMEME_HELPER, FOURMEME_MANAGER, FOURMEME_V1,
                     QUOTES, RPC, SWAP_PCS_V3, SWAP_V2, SWAP_V3, TRANSFER, batch, decode_str, eth_calls,
                     load_labels, pad, token_usd, topic_addr, word_addr, words)
-from tracker import PRICE_API, http_json, send_telegram
+from tracker import http_json, send_telegram
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_STATE = BASE_DIR / "bigbuy_state.json"
@@ -66,6 +68,13 @@ MAJORS = {
     },
 }
 POOL_CACHE_MAX = 100_000
+
+# Rekam jejak pembeli
+TRACK_DAYS = 7          # harga token dipantau selama ini setelah dibeli
+KEEP_DAYS = 30          # catatan pembelian disimpan selama ini
+MIN_AGE = 3600          # pembelian < 1 jam belum dinilai
+WIN_GAIN = 0.5          # "naik" = harga puncak >= +50% dari harga beli
+MAX_POSITIONS = 60_000
 
 
 def log(msg):
@@ -143,19 +152,24 @@ def token_meta(chain, addrs, cache):
     return cache
 
 
+# Pool V2 besar stablecoin/native untuk harga WBNB & WETH on-chain (tanpa CoinGecko, yang sering 429)
+NATIVE_POOL = {
+    "bsc": "0x16b9a82891338f9ba80e2d6970fdda79d1eb0dae",  # PancakeSwap V2 USDT-WBNB
+    "eth": "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc",  # Uniswap V2 USDC-WETH
+}
+
+
 def quote_prices(chain):
-    """alamat quote -> harga USD (stablecoin = 1). Quote tanpa harga dilewati."""
-    ids = {cg for _, _, cg in QUOTES[chain].values() if cg}
+    """alamat quote -> harga USD (stablecoin = 1, WBNB/WETH dari pool on-chain)."""
+    out = {addr: 1.0 for addr, (_, _, cg) in QUOTES[chain].items() if cg is None}
     try:
-        data = http_json(PRICE_API.format(",".join(sorted(ids))))
+        (t0, t1, res) = eth_calls(chain, [(NATIVE_POOL[chain], sel) for sel in ("0x0dfe1681", "0xd21220a7", "0x0902f1ac")])
+        r0, r1 = words(res)[:2]
+        t0, t1 = topic_addr(t0), topic_addr(t1)
+        stable, native, r_s, r_n = (t0, t1, r0, r1) if t0 in out else (t1, t0, r1, r0)
+        out[native] = (r_s / 10 ** QUOTES[chain][stable][1]) / (r_n / 10 ** QUOTES[chain][native][1])
     except Exception as exc:
-        log(f"gagal ambil harga {chain}: {exc} (hanya stablecoin yang dicek)")
-        data = {}
-    out = {}
-    for addr, (_, _, cg) in QUOTES[chain].items():
-        price = 1.0 if cg is None else data.get(cg, {}).get("usd")
-        if price:
-            out[addr] = price
+        log(f"gagal ambil harga native {chain}: {exc} (hanya stablecoin yang dicek)")
     return out
 
 
@@ -209,26 +223,31 @@ def dex_buys(chain, start, end, min_usd, prices, state):
             continue
         buyer = rc["from"].lower()
         swapped = {lg["address"].lower() for lg in rc["logs"] if lg["topics"] and lg["topics"][0] in SWAPS}
-        per_token = defaultdict(lambda: {"usd": 0.0, "paid": defaultdict(int)})
+        per_token = defaultdict(lambda: {"usd": 0.0, "paid": defaultdict(int), "pools": defaultdict(float)})
         for blk, pool, q, raw, usd, token in by_tx[tx]:
             if pool in swapped:
                 per_token[token]["usd"] += usd
                 per_token[token]["paid"][q] += raw
+                per_token[token]["pools"][(pool, q)] += usd
         for token, agg in per_token.items():
             if agg["usd"] < min_usd:
                 continue
             # Token harus benar-benar diterima pengirim tx (bukan kontrak bot / LP)
-            got = 0
+            got = out = 0
+            swap_pools = {pool for pool, _ in agg["pools"]}
             for lg in rc["logs"]:
                 if (lg["address"].lower() == token and len(lg["topics"]) == 3 and lg["topics"][0] == TRANSFER
                         and len(lg["data"]) >= 66):
                     amt = int(lg["data"][:66], 16)
                     got += amt if topic_addr(lg["topics"][2]) == buyer else 0
                     got -= amt if topic_addr(lg["topics"][1]) == buyer else 0
-            if got <= 0:
+                    out += amt if topic_addr(lg["topics"][1]) in swap_pools else 0
+            # Pembeli harus menerima sebagian besar token dari pool; sisanya = routing / arbitrase
+            if got <= 0 or got < out / 2:
                 continue
+            pool, q = max(agg["pools"], key=agg["pools"].get)  # pool utama, untuk memantau harga
             buys.append({"chain": chain, "tx": tx, "block": int(rc["blockNumber"], 16), "buyer": buyer,
-                         "token": token, "raw": got, "usd": agg["usd"],
+                         "token": token, "raw": got, "usd": agg["usd"], "pool": pool, "quote": q,
                          "paid": {QUOTES[chain][q][0]: r / 10 ** QUOTES[chain][q][1] for q, r in agg["paid"].items()}})
     return buys
 
@@ -273,7 +292,7 @@ def fourmeme_buys(start, end, min_usd, bnb_usd, state):
             continue
         buys.append({"chain": "bsc", "tx": lg["transactionHash"], "block": int(lg["blockNumber"], 16),
                      "buyer": word_addr(w[1]), "token": token, "raw": w[3], "usd": paid * price,
-                     "paid": {sym: paid}, "fourmeme": True})
+                     "paid": {sym: paid}, "fourmeme": True, "pool": "fourmeme", "quote": q})
     return buys
 
 
@@ -290,6 +309,121 @@ def drop_mev(chain, buys, end):
             continue
         keep.append(b)
     return keep
+
+
+# --- Rekam jejak pembeli ------------------------------------------------------
+
+def current_prices(chain, keys, state, prices):
+    """{(pool, quote, token)} -> harga USD token sekarang, dari pool on-chain."""
+    tokens, pools = state["tokens"].get(chain, {}), state["pools"].get(chain, {})
+    wbnb = next((a for a, v in QUOTES[chain].items() if v[0] == "WBNB"), None)
+    keys = list(keys)
+    calls = []
+    for pool, q, token in keys:
+        if pool == "fourmeme":
+            calls += [(FOURMEME_HELPER, "0x1f69565f" + pad(token)[2:])] * 2
+        else:
+            calls += [(pool, "0x0902f1ac"), (pool, "0x3850c7bd")]  # getReserves() (V2), slot0() (V3)
+    res = eth_calls(chain, calls)
+    out = {}
+    for i, (pool, q, token) in enumerate(keys):
+        v2, v3 = res[2 * i], res[2 * i + 1]
+        dt = tokens.get(token, ["?", 18])[1]
+        try:
+            if pool == "fourmeme":
+                w = words(v2) if v2 else []
+                q_usd = prices.get(wbnb) if int(q, 16) == 0 else prices.get(q)
+                if len(w) < 12 or w[11] or not q_usd:
+                    continue  # sudah pindah ke PancakeSwap: harga curve tidak berlaku lagi
+                out[(pool, q, token)] = w[3] / 1e18 * q_usd
+                continue
+            q_usd, dq = prices.get(q), QUOTES[chain][q][1]
+            t0 = (pools.get(pool) or [None])[0]
+            if not q_usd or t0 is None:
+                continue
+            if v2 and len(v2) >= 2 + 64 * 2:
+                r0, r1 = words(v2)[:2]
+                r_tok, r_q = (r0, r1) if t0 == token else (r1, r0)
+                if not r_tok or not r_q:
+                    continue
+                price_q = (r_q / 10 ** dq) / (r_tok / 10 ** dt)
+            elif v3 and len(v3) >= 2 + 64:
+                ratio = words(v3)[0] ** 2 / 2 ** 192  # harga token0 dalam token1 (unit mentah)
+                if not ratio:
+                    continue
+                price_q = ratio * 10 ** dt / 10 ** dq if t0 == token else 10 ** dt / 10 ** dq / ratio
+            else:
+                continue
+            out[(pool, q, token)] = price_q * q_usd
+        except (ValueError, ZeroDivisionError, OverflowError):
+            continue
+    return out
+
+
+def update_positions(chain, state, prices, now):
+    """Perbarui harga sekarang & harga puncak semua pembelian < TRACK_DAYS hari."""
+    pos = state["positions"]
+    live = {k: p for k, p in pos.items() if k.startswith(chain + ":") and now - p["t"] < TRACK_DAYS * 86400}
+    keys = {(p["pool"], p["q"], k.split(":")[2]) for k, p in live.items()}
+    # token0/token1 pool bisa hilang jika cache pool di-reset (POOL_CACHE_MAX)
+    pool_tokens(chain, [pool for pool, _, _ in keys if pool != "fourmeme"], state["pools"].setdefault(chain, {}))
+    cur = current_prices(chain, keys, state, prices) if keys else {}
+    for k, p in live.items():
+        v = cur.get((p["pool"], p["q"], k.split(":")[2]))
+        if v and v < p["p"] * 1000:  # > 1000x hampir pasti harga pool rusak / dimanipulasi
+            p["last"], p["peak"], p["u"] = v, max(p["peak"], v), now
+    return len(live), len(cur)
+
+
+def record_buys(chain, buys, meta, state, now):
+    pos = state["positions"]
+    for b in buys:
+        amt = b["raw"] / 10 ** meta.get(b["token"], ["?", 18])[1]
+        if amt <= 0:
+            continue
+        k = f"{chain}:{b['buyer']}:{b['token']}"
+        if k in pos:  # beli lagi: harga beli rata-rata
+            p = pos[k]
+            p["usd"] += b["usd"]
+            p["amt"] += amt
+            p["p"] = p["usd"] / p["amt"]
+        else:
+            price = b["usd"] / amt
+            pos[k] = {"p": price, "usd": b["usd"], "amt": amt, "t": now, "pool": b["pool"], "q": b["quote"],
+                      "peak": price, "last": price}
+    for k in [k for k, p in pos.items() if now - p["t"] > KEEP_DAYS * 86400]:
+        del pos[k]
+    if len(pos) > MAX_POSITIONS:
+        for k in sorted(pos, key=lambda k: pos[k]["t"])[:len(pos) - MAX_POSITIONS]:
+            del pos[k]
+
+
+def track_records(chain, state, now):
+    """pembeli -> [(token, kenaikan puncak, kenaikan sekarang)] untuk pembelian yang sudah bisa dinilai."""
+    recs = defaultdict(list)
+    for k, p in state["positions"].items():
+        c, buyer, token = k.split(":")
+        if c == chain and p.get("u") and now - p["t"] >= MIN_AGE and p["p"] > 0:
+            recs[buyer].append((token, p["peak"] / p["p"] - 1, p["last"] / p["p"] - 1))
+    return recs
+
+
+def record_stats(recs, buyer, token):
+    rows = [r for r in recs.get(buyer, []) if r[0] != token]
+    if not rows:
+        return 0, 0, 0.0, 0.0
+    n = len(rows)
+    return n, sum(r[1] >= WIN_GAIN for r in rows), sum(r[1] for r in rows) / n, sum(r[2] for r in rows) / n
+
+
+def record_text(stats):
+    n, wins, peak, cur = stats
+    if not n:
+        return "Rekam jejak: belum ada"
+    icon = "⭐" if wins / n >= 0.5 else "📉"
+    pct = lambda x: f"{round(x * 100):+d}%".replace("+0%", "0%").replace("-0%", "0%")
+    return (f"{icon} Rekam jejak: {wins}/{n} token naik ≥{WIN_GAIN:.0%} "
+            f"(puncak rata-rata {pct(peak)}, sekarang {pct(cur)})")
 
 
 # --- Alert -------------------------------------------------------------------
@@ -322,16 +456,16 @@ def alert_text(b, meta, labels, nonce):
     times = f" · {b['n']}x beli" if b["n"] > 1 else ""
     return (f"🟢 BELI BESAR {sym} · {b['chain'].upper()} {where} · {fmt_usd(b['usd'])}{times}\n"
             f"Pembeli: {b['buyer']}{f' ({who})' if who else ''}{fresh}\n"
+            f"{record_text(b['record'])}\n"
             f"Dapat: {fmt_amt(amt)} {sym} · bayar {paid}\n"
             f"Token: {b['token']}\n"
             f"{DEXSCREENER[b['chain']]}{b['token']}\n"
             f"{EXPLORER_TX[b['chain']]}{b['tx']}")
 
 
-def send_alerts(chain, buys, state, max_alerts):
+def send_alerts(chain, buys, meta, max_alerts):
     if not buys:
         return
-    meta = token_meta(chain, [b["token"] for b in buys], state["tokens"].setdefault(chain, {}))
     labels = load_labels()
     shown = buys[:max_alerts]
     nonces = batch(chain, [("eth_getTransactionCount", [b["buyer"], "latest"]) for b in shown])
@@ -368,14 +502,31 @@ def run_chain(chain, args, state):
         return
     log(f"{chain}: blok {start:,}-{head:,} ({head - start + 1:,} blok)")
     prices = quote_prices(chain)
-    buys = dex_buys(chain, start, head, args.min_usd, prices, state)
+    # Pembelian di atas --track-usd dicatat untuk rekam jejak; alert hanya >= --min-usd
+    track_usd = min(args.track_usd, args.min_usd)
+    buys = dex_buys(chain, start, head, track_usd, prices, state)
     if chain == "bsc":
         wbnb = next(a for a, v in QUOTES["bsc"].items() if v[0] == "WBNB")
-        buys += fourmeme_buys(start, head, args.min_usd, prices.get(wbnb), state)
+        buys += fourmeme_buys(start, head, track_usd, prices.get(wbnb), state)
     buys = merge(drop_mev(chain, buys, head))
-    send_alerts(chain, buys, state, args.max_alerts)
+    now = time.time()
+    meta = token_meta(chain, [b["token"] for b in buys], state["tokens"].setdefault(chain, {}))
+    n_live, n_priced = update_positions(chain, state, prices, now)
+    recs = track_records(chain, state, now)
+    alerts = []
+    for b in buys:
+        if b["usd"] < args.min_usd:
+            continue
+        b["record"] = record_stats(recs, b["buyer"], b["token"])
+        n, wins = b["record"][:2]
+        if args.smart_only and not (n >= args.smart_min and wins / n >= 0.5):
+            continue
+        alerts.append(b)
+    record_buys(chain, buys, meta, state, now)
+    send_alerts(chain, alerts, meta, args.max_alerts)
     state["last"][chain] = head
-    log(f"{chain}: {len(buys)} beli besar")
+    log(f"{chain}: {len(alerts)} alert, {len(buys)} beli tercatat; "
+        f"{n_live:,} pembelian dipantau ({n_priced:,} pool berhasil dicek harganya)")
 
 
 def load_state(path):
@@ -383,7 +534,7 @@ def load_state(path):
         state = json.loads(path.read_text())
     except Exception:
         state = {}
-    for k in ("last", "pools", "tokens"):
+    for k in ("last", "pools", "tokens", "positions"):
         state.setdefault(k, {})
     for chain, cache in state["pools"].items():
         if len(cache) > POOL_CACHE_MAX:
@@ -401,6 +552,12 @@ def main():
     p.add_argument("--max-minutes", type=float, default=60,
                    help="rentang maksimal per cek; RPC publik BSC hanya simpan log ~75 menit (default 60)")
     p.add_argument("--max-alerts", type=int, default=25, help="alert maksimal per chain per cek (default 25)")
+    p.add_argument("--track-usd", type=float, default=5_000,
+                   help="pembelian >= ini dicatat untuk rekam jejak walau di bawah --min-usd (default 5000)")
+    p.add_argument("--smart-only", action="store_true",
+                   help="hanya alert pembeli yang rekam jejaknya bagus (>= setengah token naik >= 50%%)")
+    p.add_argument("--smart-min", type=int, default=2,
+                   help="jumlah token minimal di rekam jejak untuk --smart-only (default 2)")
     p.add_argument("--state", default=str(DEFAULT_STATE), help="file state (blok terakhir & cache pool)")
     args = p.parse_args()
     chains = [c.strip() for c in args.chains.split(",") if c.strip()]
