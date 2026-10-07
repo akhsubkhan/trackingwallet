@@ -99,9 +99,23 @@ def sol_balance(address):
     return rpc(SOL_RPC, "getBalance", [address])["value"] / 1e9
 
 
+TRON_RETRIES = 4  # TronGrid tanpa API key cepat membalas 429 Too Many Requests
+
+
 def tron_account(address):
-    data = http_json(TRON_API.format(address))["data"]
-    return data[0] if data else {}
+    for attempt in range(TRON_RETRIES + 1):
+        try:
+            data = http_json(TRON_API.format(address))["data"]
+            return data[0] if data else {}
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt == TRON_RETRIES:
+                raise
+            # Ikuti Retry-After jika ada, selain itu backoff 2s, 4s, 8s, 16s
+            retry_after = exc.headers.get("Retry-After", "")
+            wait = min(float(retry_after), 30) if retry_after.isdigit() else 2 ** (attempt + 1)
+            print(f"[info] TronGrid 429, coba lagi dalam {wait:.0f}s ({attempt + 1}/{TRON_RETRIES})",
+                  file=sys.stderr)
+            time.sleep(wait)
 
 
 def tron_balance(address):
