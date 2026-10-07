@@ -50,6 +50,7 @@ FM_SELL = "0x0a5575b3648bae2210cee56bf33254cc1ddfbc7bf637c0af2ac18b14fb1bae19"  
 CG_PLATFORM = {"bsc": "binance-smart-chain", "eth": "ethereum"}
 
 EXPLORER = {"bsc": "https://bscscan.com/address/", "eth": "https://etherscan.io/address/"}
+EXPLORER_TX = {"bsc": "https://bscscan.com/tx/", "eth": "https://etherscan.io/tx/"}
 BURN = {"0x0000000000000000000000000000000000000000", "0x000000000000000000000000000000000000dead"}
 
 # Token pasangan (quote) di pool DEX: alamat -> (simbol, desimal, id CoinGecko; None = stablecoin $1)
@@ -642,6 +643,7 @@ def scan(chain, token, hours, top=20, max_funding=40):
                      "kind": kinds.get(a, {}).get("kind", "?"), "label": kinds.get(a, {}).get("label")}
                     for a, b in holders],
         "ranking": rows[:top],
+        "dex": sorted(pools) + ([fm["manager"]] if fm else []),  # pool DEX + bonding curve, untuk mode instan
     }
 
 
@@ -709,32 +711,113 @@ def cmd_scan(args):
         print_report(rep)
 
 
+def notify(msg):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n", flush=True)
+    send_telegram(msg)
+
+
+def instant_check(chain, rep, from_block, big_pct):
+    """Alert instan dari blok baru: beli/jual besar dan bundle. Mengembalikan blok terakhir yang dicek."""
+    head = int(rpc(RPC[chain], "eth_blockNumber", []), 16)
+    if head <= from_block:
+        return from_block
+    t = rep["token"]
+    token, dec, circ, price = t["address"], t["decimals"], t["circulating"], rep["price_usd"]
+    dex = set(rep["dex"])
+    logs = get_logs(chain, token, [TRANSFER], max(from_block + 1, head - 5000), head)
+    by_tx = defaultdict(Counter)
+    tx_block = {}
+    for lg in logs:
+        if len(lg["topics"]) != 3 or lg["data"] in ("0x", ""):
+            continue
+        amt = int(lg["data"], 16) / 10 ** dec
+        tx = lg["transactionHash"]
+        by_tx[tx][topic_addr(lg["topics"][2])] += amt
+        by_tx[tx][topic_addr(lg["topics"][1])] -= amt
+        tx_block[tx] = int(lg["blockNumber"], 16)
+    sym = f"{t['symbol']} ({chain})"
+    trades = []  # (sisi, jumlah, wallet, tx)
+    block_buys = defaultdict(list)
+    for tx, delta in by_tx.items():
+        dex_flow = sum(v for a, v in delta.items() if a in dex)
+        if not dex_flow:
+            continue  # bukan transaksi DEX / bonding curve
+        side = "BELI" if dex_flow < 0 else "JUAL"
+        for a, v in delta.items():
+            if a in dex or a in BURN or (v > 0) != (side == "BELI"):
+                continue
+            trades.append((side, abs(v), a, tx))
+            if side == "BELI":
+                block_buys[tx_block[tx]].append((abs(v), a, tx))
+    bundled = set()
+    for blk, buys in block_buys.items():  # bundle: >= 3 wallet beli jumlah hampir sama di blok yang sama
+        buys.sort()
+        group = [buys[0]]
+        for b in buys[1:] + [None]:
+            if b is not None and b[0] <= group[0][0] * 1.05 and b[1] not in {g[1] for g in group}:
+                group.append(b)
+                continue
+            if len(group) >= 3:
+                bundled |= {g[2] for g in group}
+                total = sum(g[0] for g in group)
+                notify(f"🚨 BUNDLE {sym} di blok {blk:,}\n"
+                       f"{len(group)} wallet beli ±{group[0][0]:,.0f} {t['symbol']} masing-masing, "
+                       f"total {total / circ * 100:.2f}% supply beredar\n"
+                       + "\n".join(f"• {g[1]}" for g in group[:5])
+                       + (f"\n… +{len(group) - 5} wallet lain" if len(group) > 5 else "")
+                       + f"\n{EXPLORER_TX[chain]}{group[0][2]}")
+            group = [b] if b is not None else []
+    for side, amt, a, tx in trades:  # beli/jual besar (yang sudah masuk alert bundle dilewati)
+        pct = amt / circ * 100
+        if pct >= big_pct and tx not in bundled:
+            usd = f" (~{fmt_usd(amt * price)})" if price else ""
+            notify(f"{'🟢' if side == 'BELI' else '🔴'} {side} BESAR {sym}\n"
+                   f"{a} {side.lower()} {amt:,.0f} {t['symbol']}{usd} = {pct:.2f}% supply beredar\n"
+                   f"{EXPLORER_TX[chain]}{tx}")
+    return head
+
+
 def cmd_watch(args):
     state_path = Path(args.state)
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
-    print(f"Memantau {args.token} tiap {args.interval}s, alert jika skor >= {args.min_score}. Ctrl+C untuk berhenti.")
+    instant = "" if args.no_instant else (f", cek instan tiap {args.poll}s "
+                                          f"(beli/jual >= {args.big_pct}% supply, bundle)")
+    print(f"Memantau {args.token}: analisis skor tiap {args.interval}s (alert jika skor >= {args.min_score})"
+          f"{instant}. Ctrl+C untuk berhenti.")
+    last_scan, last_block, rep = 0.0, None, None
     while True:
-        try:
-            rep = scan(args.chain, args.token, args.hours, args.top)
-        except Exception as exc:
-            print(f"[error] {exc}", file=sys.stderr)
-            rep = None
-        # Alert untuk wallet baru di atas ambang, atau yang skornya naik >= 10
-        hits = defaultdict(list)
-        for r in (rep or {}).get("ranking", []):
-            prev = state.get(f"{args.chain}:{args.token.lower()}:{r['wallet']}")
-            if r["score"] >= args.min_score and (prev is None or r["score"] >= prev + 10):
-                hits[r["cluster"]].append(r)
-        for rows in hits.values():
-            msg = alert_text(rep, rows)
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n", flush=True)
-            send_telegram(msg)
-            for r in rows:
-                state[f"{args.chain}:{args.token.lower()}:{r['wallet']}"] = r["score"]
-            state_path.write_text(json.dumps(state, indent=2))
+        if args.once or rep is None or time.time() - last_scan >= args.interval:
+            try:
+                rep = scan(args.chain, args.token, args.hours, args.top) or rep
+                last_block = rep["blocks"][1] if last_block is None else last_block
+            except Exception as exc:
+                print(f"[error] {exc}", file=sys.stderr)
+            last_scan = time.time()
+            score_alerts(args, rep, state, state_path)
         if args.once:
             break
-        time.sleep(args.interval)
+        if rep and not args.no_instant:
+            try:
+                last_block = instant_check(args.chain, rep, last_block, args.big_pct)
+            except Exception as exc:
+                print(f"[error] cek instan: {exc}", file=sys.stderr)
+            time.sleep(args.poll)
+        else:
+            time.sleep(max(1, args.interval - (time.time() - last_scan)))
+
+
+def score_alerts(args, rep, state, state_path):
+    # Alert untuk wallet baru di atas ambang, atau yang skornya naik >= 10
+    hits = defaultdict(list)
+    for r in (rep or {}).get("ranking", []):
+        prev = state.get(f"{args.chain}:{args.token.lower()}:{r['wallet']}")
+        if r["score"] >= args.min_score and (prev is None or r["score"] >= prev + 10):
+            hits[r["cluster"]].append(r)
+    for rows in hits.values():
+        notify(alert_text(rep, rows))
+        for r in rows:
+            state[f"{args.chain}:{args.token.lower()}:{r['wallet']}"] = r["score"]
+        state_path.write_text(json.dumps(state, indent=2))
 
 
 def main():
@@ -750,7 +833,11 @@ def main():
         s.set_defaults(func=func)
     sub.choices["scan"].add_argument("--json", action="store_true", help="output JSON")
     w = sub.choices["watch"]
-    w.add_argument("--interval", type=int, default=600, help="detik antar analisis (default 600)")
+    w.add_argument("--interval", type=int, default=60, help="detik antar analisis skor lengkap (default 60)")
+    w.add_argument("--poll", type=float, default=3, help="detik antar cek instan blok baru (default 3)")
+    w.add_argument("--big-pct", type=float, default=1.0,
+                   help="alert instan jika satu beli/jual >= %% supply beredar ini (default 1.0)")
+    w.add_argument("--no-instant", action="store_true", help="matikan alert instan (hanya analisis skor)")
     w.add_argument("--min-score", type=float, default=60, help="skor minimal untuk alert (default 60)")
     w.add_argument("--state", default=str(DEFAULT_STATE), help="file skor yang sudah di-alert")
     w.add_argument("--once", action="store_true", help="analisis sekali lalu keluar (untuk cron)")

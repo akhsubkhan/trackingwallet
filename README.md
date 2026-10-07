@@ -128,9 +128,23 @@ python3 bandar.py scan --chain eth --token 0xALAMAT_TOKEN --hours 6 --top 30 --j
 # Token four.meme: sama saja, dikenali otomatis
 python3 bandar.py scan --chain bsc --token 0x....4444
 
-# Pantau terus tiap 10 menit, alert (terminal + Telegram) jika skor >= 60
+# Pantau terus: analisis skor tiap 60 detik + alert instan tiap 3 detik
 python3 bandar.py watch --chain bsc --token 0xALAMAT_TOKEN --min-score 60
+
+# Atur sendiri: ambang beli/jual besar 0,5% supply, cek instan tiap 2 detik
+python3 bandar.py watch --chain bsc --token 0xALAMAT_TOKEN --big-pct 0.5 --poll 2
 ```
+
+`watch` punya dua lapis alert (terminal + Telegram):
+
+| Alert | Kapan | Delay |
+|---|---|---|
+| 🟢/🔴 **BELI/JUAL BESAR** | Satu transaksi DEX / bonding curve ≥ `--big-pct` % supply beredar (default 1%) | ±3–5 detik (`--poll`) |
+| 🚨 **BUNDLE** | ≥ 3 wallet beli jumlah hampir sama di satu blok | ±3–5 detik |
+| 🚨 **BANDAR** (skor) | Wallet/cluster mencapai `--min-score`, atau skornya naik ≥ 10 | ≤ 60 detik (`--interval`) |
+
+Wallet yang sudah masuk alert bundle tidak dikirim ulang sebagai beli besar.
+Matikan alert instan dengan `--no-instant`.
 
 Contoh alert (satu pesan per cluster):
 
