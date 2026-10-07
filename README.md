@@ -60,6 +60,27 @@ python3 tracker.py watch
 
 Alert akan dikirim ke Telegram sekaligus tampil di terminal.
 
+## Jalan otomatis di GitHub Actions (tanpa laptop menyala)
+
+Workflow `.github/workflows/watch.yml` menjalankan `watch --once` tiap 15 menit
+di server GitHub dan mengirim alert ke Telegram.
+
+1. Buka repo → **Settings → Secrets and variables → Actions → New repository secret**,
+   tambahkan `TELEGRAM_BOT_TOKEN` dan `TELEGRAM_CHAT_ID`.
+2. (Opsional) Di tab **Variables**, buat `MIN_USD` untuk mengubah batas alert
+   (default `1000000`).
+3. Buka tab **Actions → Whale watch → Run workflow** untuk tes pertama. Run pertama
+   hanya mencatat saldo awal; alert muncul mulai run berikutnya.
+
+Catatan:
+- Jadwal GitHub bisa telat 5–30 menit saat sibuk, kadang satu jadwal terlewat.
+- Saldo terakhir disimpan di cache Actions (bukan di-commit ke repo).
+- Repo privat punya kuota 2.000 menit/bulan; tiap 15 menit ≈ 2.900 run/bulan, jadi
+  bisa melebihi kuota. Ubah `cron` di workflow (mis. `7,37 * * * *` = tiap 30 menit)
+  atau jadikan repo publik.
+- Di repo publik, GitHub menonaktifkan jadwal jika repo tidak ada aktivitas 60 hari;
+  aktifkan lagi dari tab Actions.
+
 ## Daftar wallet (`wallets.json`)
 
 Wallet dikelompokkan per grup (`global`, `indonesia`, atau grup buatan sendiri).
