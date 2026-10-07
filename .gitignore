@@ -1,2 +1,4 @@
 state.json
 __pycache__/
+cache/
+bandar_state.json

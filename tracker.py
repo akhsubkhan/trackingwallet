@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -57,7 +58,7 @@ TOKENS = {
     },
     "sol": {
         "USDT": ("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", 6, "tether"),
-        "USDC": ("EPjFWdd5AufqALUtJjDcoXzmYbcixMHCPXYeqNfdi36", 6, "usd-coin"),
+        "USDC": ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 6, "usd-coin"),
     },
     "tron": {
         "USDT": ("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", 6, "tether"),
@@ -232,8 +233,18 @@ def send_telegram(text):
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         return
+    if chat_id == token.split(":")[0]:
+        print("[peringatan] TELEGRAM_CHAT_ID berisi ID bot sendiri; isi dengan chat ID Anda "
+              "(lihat README bagian Notifikasi Telegram)", file=sys.stderr)
+        return
     try:
         http_json(f"https://api.telegram.org/bot{token}/sendMessage", {"chat_id": chat_id, "text": text})
+    except urllib.error.HTTPError as exc:
+        try:
+            reason = json.load(exc).get("description", exc)
+        except Exception:
+            reason = exc
+        print(f"[peringatan] gagal kirim Telegram: {reason}", file=sys.stderr)
     except Exception as exc:
         print(f"[peringatan] gagal kirim Telegram: {exc}", file=sys.stderr)
 
