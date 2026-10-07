@@ -22,11 +22,6 @@
       "address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
     },
     {
-      "name": "Ethereum Beacon Deposit Contract",
-      "chain": "eth",
-      "address": "0x00000000219ab540356cBB839Cbe05303d7705Fa"
-    },
-    {
       "name": "Wrapped Ether (WETH) Contract",
       "chain": "eth",
       "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
@@ -34,11 +29,7 @@
     {
       "name": "Binance 7 (ETH)",
       "chain": "eth",
-      "address": "0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8",
-      "tokens": [
-        "USDT",
-        "USDC"
-      ]
+      "address": "0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8"
     },
     {
       "name": "Arbitrum Bridge (ETH)",

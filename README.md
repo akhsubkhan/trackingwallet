@@ -73,8 +73,8 @@ Setiap entri: `name`, `chain` (lihat tabel di atas), `address`, dan opsional `to
 ### Grup `global`
 
 Berisi alamat publik yang sudah dikenal luas: cold wallet Binance & Bitfinex,
-Robinhood, alamat genesis Satoshi, kontrak deposit Beacon ETH 2.0, kontrak WETH,
-Binance 7 (beserta saldo USDT/USDC), bridge Arbitrum, dan wallet Vitalik Buterin.
+Robinhood, alamat genesis Satoshi, kontrak WETH,
+Binance 7, bridge Arbitrum, dan wallet Vitalik Buterin.
 
 ### Grup `indonesia`
 
