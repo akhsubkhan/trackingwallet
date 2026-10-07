@@ -41,6 +41,14 @@ SWAP_V2 = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
 SWAP_V3 = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
 SWAP_PCS_V3 = "0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83"
 
+# four.meme (BSC): token diperdagangkan di bonding curve TokenManager sebelum listing di PancakeSwap
+FOURMEME_HELPER = "0xf251f83e40a78868fcfa3fa4599dad6494e46034"  # TokenManagerHelper3.getTokenInfo
+FOURMEME_MANAGER = "0x5c952063c7fc8610ffdb798152d69f0b9550762b"  # TokenManager V2
+FOURMEME_V1 = "0xec4549cadce5da21df6e6422d448034b5233bfbc"
+FM_BUY = "0x7db52723a3b2cdd6164364b3b766e65e540d7be48ffa89582956d8eaebe62942"  # TokenPurchase(...)
+FM_SELL = "0x0a5575b3648bae2210cee56bf33254cc1ddfbc7bf637c0af2ac18b14fb1bae19"  # TokenSale(...)
+CG_PLATFORM = {"bsc": "binance-smart-chain", "eth": "ethereum"}
+
 EXPLORER = {"bsc": "https://bscscan.com/address/", "eth": "https://etherscan.io/address/"}
 BURN = {"0x0000000000000000000000000000000000000000", "0x000000000000000000000000000000000000dead"}
 
@@ -77,6 +85,10 @@ def topic_addr(topic):
 
 def pad(addr):
     return "0x" + addr.lower().removeprefix("0x").rjust(64, "0")
+
+
+def word_addr(x):
+    return "0x" + hex(x)[2:].rjust(40, "0")
 
 
 def words(data):
@@ -229,6 +241,56 @@ def load_labels():
     return labels
 
 
+def token_usd(chain, addr):
+    """Harga USD token sembarang via CoinGecko (untuk quote four.meme di luar QUOTES)."""
+    try:
+        url = (f"https://api.coingecko.com/api/v3/simple/token_price/{CG_PLATFORM[chain]}"
+               f"?contract_addresses={addr}&vs_currencies=usd")
+        return http_json(url)[addr]["usd"]
+    except Exception as exc:
+        log(f"gagal ambil harga {addr}: {exc}")
+        return None
+
+
+def fourmeme_info(chain, token):
+    """Info bonding curve four.meme, atau None jika bukan token four.meme."""
+    if chain != "bsc":
+        return None
+    (raw,) = eth_calls(chain, [(FOURMEME_HELPER, "0x1f69565f" + pad(token)[2:])])
+    if not raw or len(raw) < 2 + 64 * 12:
+        return None
+    w = words(raw)
+    if w[1] == 0:
+        return None
+    manager = word_addr(w[1])
+    quote = None if w[2] == 0 else word_addr(w[2])
+    if quote is None:
+        q_sym, q_dec, q_usd = "BNB", 18, usd_price("binancecoin")
+    elif quote in QUOTES[chain]:
+        q_sym, q_dec, cg = QUOTES[chain][quote]
+        q_usd = usd_price(cg)
+    else:
+        q = token_info(chain, quote)
+        q_sym, q_dec, q_usd = q["symbol"], q["decimals"], token_usd(chain, quote)
+    return {"manager": manager, "quote": q_sym, "quote_decimals": q_dec, "quote_usd": q_usd,
+            "progress_pct": w[9] / w[10] * 100 if w[10] else None, "listed": bool(w[11])}
+
+
+def parse_fourmeme(logs, token, fm, swaps):
+    """TokenPurchase/TokenSale(token, account, price, amount, cost, fee, offers, funds) -> swaps."""
+    for lg in logs:
+        w = words(lg["data"])
+        if len(w) < 8 or word_addr(w[0]) != token:
+            continue
+        buy = lg["topics"][0] == FM_BUY
+        quote_amt = (w[4] + w[5] if buy else w[4] - w[5]) / 10 ** fm["quote_decimals"]  # termasuk fee
+        swaps[lg["transactionHash"]].append({
+            "side": "buy" if buy else "sell", "raw": w[3],
+            "usd": quote_amt * fm["quote_usd"] if fm["quote_usd"] else None,
+            "block": int(lg["blockNumber"], 16), "pool": lg["address"].lower(),
+        })
+
+
 def classify(chain, addrs, labels):
     """alamat -> {'kind': wallet|exchange|pool|contract|burn, ...}"""
     addrs = list(dict.fromkeys(addrs))
@@ -237,6 +299,8 @@ def classify(chain, addrs, labels):
     for a, code in zip(addrs, codes):
         if a in BURN:
             result[a] = {"kind": "burn"}
+        elif a in (FOURMEME_MANAGER, FOURMEME_V1):
+            result[a] = {"kind": "curve", "label": "four.meme bonding curve"}
         elif a in labels:
             result[a] = {"kind": "exchange", "label": labels[a]}
         elif code in (None, "0x") or code.startswith("0xef0100"):  # EOA (termasuk delegasi EIP-7702)
@@ -305,8 +369,16 @@ def scan(chain, token, hours, top=20, max_funding=40):
     dec = info["decimals"]
     burned = sum(int(b, 16) for b in eth_calls(chain, [(token, "0x70a08231" + pad(a)[2:]) for a in BURN])
                  if b and b != "0x") / 10 ** dec
-    supply = max(info["supply"] - burned, 1)  # supply beredar: semua % dihitung dari sini
+    fm = fourmeme_info(chain, token)
+    in_curve = 0.0
+    if fm:  # token yang belum terjual di bonding curve belum beredar
+        (b,) = eth_calls(chain, [(token, "0x70a08231" + pad(fm["manager"])[2:])])
+        in_curve = int(b, 16) / 10 ** dec if b and b != "0x" else 0.0
+        if fm["manager"] != FOURMEME_MANAGER:
+            log("token four.meme versi lama (V1): transaksi bonding curve tidak dibaca")
+    supply = max(info["supply"] - burned - in_curve, 1)  # supply beredar: semua % dihitung dari sini
     info["circulating"] = supply
+    info["fourmeme"] = fm
     start, end, block_time = block_range(chain, hours)
 
     # 1. Transfer token -> arus per alamat (log lama diambil dari cache lokal)
@@ -361,9 +433,19 @@ def scan(chain, token, hours, top=20, max_funding=40):
         if group and frm <= end:
             swap_logs += [{k: lg[k] for k in ("address", "topics", "data", "blockNumber", "transactionHash")}
                           for lg in get_logs(chain, group, [[SWAP_V2, SWAP_V3, SWAP_PCS_V3]], frm, end)]
+    # Transaksi bonding curve four.meme (event tidak ter-index: ambil semua lalu saring per token)
+    curve_logs = [lg for lg in cache.get("curve", []) if int(lg["blockNumber"], 16) >= start] if use_cache else []
+    if fm and fm["manager"] == FOURMEME_MANAGER:
+        frm = max(avail, cache.get("curve_end", -1) + 1) if use_cache else avail
+        if frm <= end:
+            curve_logs += [{k: lg[k] for k in ("address", "topics", "data", "blockNumber", "transactionHash")}
+                           for lg in get_logs(chain, FOURMEME_MANAGER, [[FM_BUY, FM_SELL]], frm, end)
+                           if lg["data"][26:66] == token[2:]]
     save_cache(chain, token, {"start": start, "end": end, "transfers": transfers, "swaps": swap_logs, "swap_end": end,
-                              "pools": sorted(known | set(swap_pools))})
+                              "pools": sorted(known | set(swap_pools)), "curve": curve_logs, "curve_end": end})
     swaps = parse_swaps(chain, swap_logs, pools, token, quote_usd)
+    if fm:
+        parse_fourmeme(curve_logs, token, fm, swaps)
     log(f"{sum(map(len, swaps.values())):,} swap")
 
     priced = [s for ss in swaps.values() for s in ss if s["usd"]]
@@ -374,7 +456,7 @@ def scan(chain, token, hours, top=20, max_funding=40):
 
     # Atribusi swap ke wallet: wallet EOA yang saldo tokennya naik/turun di tx tsb
     st = defaultdict(lambda: {"buy_n": 0, "sell_n": 0, "buy_tok": 0.0, "sell_tok": 0.0,
-                              "cost": 0.0, "proceeds": 0.0, "buy_blocks": set()})
+                              "cost": 0.0, "proceeds": 0.0, "buy_blocks": Counter()})
     direct = defaultdict(Counter)  # penerima -> pengirim -> jumlah (transfer non-DEX)
     for tx, moves in by_tx.items():
         delta = Counter()
@@ -396,7 +478,7 @@ def scan(chain, token, hours, top=20, max_funding=40):
                     s[f"{side}_tok"] += d
                     s["cost" if side == "buy" else "proceeds"] += usd * d / tot
                     if side == "buy":
-                        s["buy_blocks"].add(ss[0]["block"])
+                        s["buy_blocks"][ss[0]["block"]] += d
         else:
             for frm, to, amt in moves:
                 if kinds.get(frm, {}).get("kind") not in ("pool", "burn") and to in wallets and amt >= dust:
@@ -422,9 +504,11 @@ def scan(chain, token, hours, top=20, max_funding=40):
                 funders[topic_addr(lg["topics"][2])][topic_addr(lg["topics"][1])] += amt
     senders = {s for c in funders.values() for s in c} | {s for c in direct.values() for s in c}
     kinds.update(classify(chain, [s for s in senders if s not in kinds], labels))
-    # Token dari kontrak (router, bonding curve, airdrop) bukan distribusi antar wallet
-    for a in list(direct):
-        direct[a] = Counter({s: v for s, v in direct[a].items() if kinds[s]["kind"] in ("wallet", "exchange")})
+    # Dana/token dari kontrak (router, pool, bonding curve, airdrop) adalah hasil trading,
+    # bukan pendanaan antar wallet
+    for src_map in (direct, funders):
+        for a in list(src_map):
+            src_map[a] = Counter({s: v for s, v in src_map[a].items() if kinds[s]["kind"] in ("wallet", "exchange")})
 
     def source_ok(addr):
         # Sumber yang bermakna untuk cluster: wallet biasa, bukan pool/router/exchange,
@@ -475,6 +559,22 @@ def scan(chain, token, hours, top=20, max_funding=40):
             coord[y] += n
             why[x].add("beli serentak di blok yang sama")
             why[y].add("beli serentak di blok yang sama")
+    # Bundle: >= 3 wallet beli di blok yang sama dengan jumlah hampir identik (selisih <= 5%),
+    # pola khas peluncuran four.meme / bundler
+    bundled = set()
+    for blk, buyers in block_buyers.items():
+        amts = sorted((st[a]["buy_blocks"][blk], a) for a in buyers)
+        group = [amts[0]] if amts else []
+        for amt, a in amts[1:] + [(None, None)]:
+            if amt is not None and amt <= group[0][0] * 1.05:
+                group.append((amt, a))
+                continue
+            if len(group) >= 3:
+                for _, m in group:
+                    uf.union(group[0][1], m)
+                    bundled.add(m)
+                    why[m].add(f"bundle: {len(group)} wallet beli jumlah sama di blok {blk:,}")
+            group = [(amt, a)]
 
     clusters = defaultdict(list)
     for a in accum:
@@ -507,7 +607,7 @@ def scan(chain, token, hours, top=20, max_funding=40):
             "akumulasi": min(20, cl_net * 8),
             "dominasi beli": 10 * s["buy_tok"] / traded if traded else (5 if direct[a] else 0),
             "cluster": min(15, (len(members) - 1) * 3),
-            "beli serentak": min(10, coord[a] * 2),
+            "beli serentak": 10 if a in bundled else min(10, coord[a] * 2),
             "sumber dana": (10 if any(source_ok(f) and len(shared[f]) > 1 for f in fund)
                             else 6 if direct[a] else 3 if fund else 0),
             "profit": min(10, max(0, roi / 10)) if roi is not None else 0,
@@ -537,7 +637,8 @@ def scan(chain, token, hours, top=20, max_funding=40):
         "transfers": len(transfers), "swaps": sum(map(len, swaps.values())),
         "accumulators": len(accum), "accumulators_last_quarter": len(late),
         "clusters": sum(1 for m in clusters.values() if len(m) > 1),
-        "holders": [{"address": a, "balance_pct": b / supply * 100,
+        "holders": [{"address": a, "balance_pct": b / (supply if kinds.get(a, {}).get("kind") == "wallet"
+                                                       else info["supply"]) * 100,
                      "kind": kinds.get(a, {}).get("kind", "?"), "label": kinds.get(a, {}).get("label")}
                     for a, b in holders],
         "ranking": rows[:top],
@@ -555,6 +656,10 @@ def print_report(rep):
     price = f"${rep['price_usd']:.8g}" if rep["price_usd"] else "-"
     print(f"\n{t['symbol']} ({rep['chain']}) {t['address']}  harga {price}  "
           f"supply beredar {t['circulating']:,.0f} (total {t['supply']:,.0f})")
+    fm = t.get("fourmeme")
+    if fm:
+        status = "sudah listing di PancakeSwap" if fm["listed"] else f"bonding {fm['progress_pct'] or 0:.1f}%"
+        print(f"four.meme: {status}, quote {fm['quote']}")
     print(f"Jendela {rep['hours']} jam | {rep['transfers']:,} transfer, {rep['swaps']:,} swap | "
           f"{rep['accumulators']} wallet akumulasi ({rep['accumulators_last_quarter']} aktif di 1/4 akhir) | "
           f"{rep['clusters']} cluster")

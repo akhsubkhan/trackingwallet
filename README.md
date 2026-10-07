@@ -125,6 +125,9 @@ TOKEN → holder aktif → filter exchange / LP / kontrak → wallet yang akumul
 python3 bandar.py scan --chain bsc --token 0xALAMAT_TOKEN
 python3 bandar.py scan --chain eth --token 0xALAMAT_TOKEN --hours 6 --top 30 --json
 
+# Token four.meme: sama saja, dikenali otomatis
+python3 bandar.py scan --chain bsc --token 0x....4444
+
 # Pantau terus tiap 10 menit, alert (terminal + Telegram) jika skor >= 60
 python3 bandar.py watch --chain bsc --token 0xALAMAT_TOKEN --min-score 60
 ```
@@ -146,9 +149,10 @@ pegangan cluster +25, akumulasi +20, cluster +15, profit +10
 | Holder aktif | Semua event `Transfer` token di jendela waktu → arus masuk/keluar per alamat, saldo via `balanceOf` |
 | Filter | Exchange (label di `labels.json` + `wallets.json`), pool DEX (punya `token0/token1`), kontrak lain, alamat burn. Persentase dihitung dari **supply beredar** (total − burn) |
 | Transaksi DEX | Event `Swap` Uniswap/PancakeSwap V2 & V3 di pool token → beli/jual per wallet + nilai USD |
+| four.meme | Token four.meme (BSC) otomatis dikenali: beli/jual di bonding curve (`TokenPurchase`/`TokenSale` TokenManager V2) ikut dihitung, quote BNB/USDT/token lain, progres bonding & status listing ditampilkan, token yang masih di curve tidak dihitung beredar |
 | Profit | PnL token ini di jendela: hasil jual + nilai token yang masih dipegang − modal beli |
 | Sumber dana | USDT/USDC/WBNB/dll. yang masuk ke wallet (≥ $20) dan token yang dikirim langsung antar wallet (≥ 0,01% supply) |
-| Cluster | Wallet disatukan jika: saling kirim token, didanai wallet yang sama, atau berulang kali beli di blok yang sama. Hub yang mengirim ke >100 alamat (bot airdrop) diabaikan |
+| Cluster | Wallet disatukan jika: saling kirim token, didanai wallet yang sama, berulang kali beli di blok yang sama, atau **bundle** (≥ 3 wallet beli jumlah hampir sama, selisih ≤ 5%, di satu blok — pola bundler peluncuran four.meme). Hub yang mengirim ke >100 alamat (bot airdrop) diabaikan |
 | Ikut akumulasi | Jumlah wallet akumulasi dan berapa yang aktif di ¼ akhir jendela |
 
 **BANDAR SCORE** (maks. 100):
@@ -159,7 +163,7 @@ pegangan cluster +25, akumulasi +20, cluster +15, profit +10
 | Akumulasi bersih cluster di jendela | s/d 20 |
 | Cluster (jumlah wallet terhubung) | s/d 15 |
 | Dominasi beli (beli vs jual) | s/d 10 |
-| Beli serentak di blok yang sama | s/d 10 |
+| Beli serentak di blok yang sama / bundle | s/d 10 |
 | Sumber dana (didanai wallet yang sama / terima token langsung) | s/d 10 |
 | Profit (ROI) | s/d 10 |
 | Beli ≥ 3x tanpa pernah jual | 5 |
@@ -180,7 +184,8 @@ pegangan cluster +25, akumulasi +20, cluster +15, profit +10
   butuh indexer berbayar. Harga WBNB/WETH memakai harga saat ini.
 - **Sumber dana** hanya dari token ERC-20 (stablecoin/WBNB/WETH). Pendanaan BNB/ETH
   native tidak terlihat lewat event log.
-- Belum mendukung Uniswap V4 dan pembelian lewat bonding curve (mis. four.meme
-  sebelum listing di PancakeSwap).
+- Belum mendukung Uniswap V4 dan token four.meme versi lama (TokenManager V1, 2024).
+  Pembeli four.meme umumnya membayar BNB native, jadi sumber dananya sering tidak
+  terlihat; deteksi bundle tetap jalan karena berbasis pola pembelian.
 - Skor adalah **heuristik**, bukan bukti. Bot volume/MEV dan market maker bisa
   terlihat mirip bandar. Selalu cek manual di explorer sebelum mengambil keputusan.
