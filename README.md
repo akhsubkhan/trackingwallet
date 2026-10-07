@@ -48,8 +48,11 @@ Jika harga gagal diambil, setiap perubahan saldo akan di-alert.
 ## Notifikasi Telegram
 
 1. Buat bot lewat [@BotFather](https://t.me/BotFather), salin token-nya.
-2. Kirim pesan apa saja ke bot, lalu buka
-   `https://api.telegram.org/bot<TOKEN>/getUpdates` untuk melihat `chat.id`.
+2. Buka chat dengan bot Anda di Telegram, tekan **Start** / kirim pesan apa saja, lalu buka
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` dan salin `message.chat.id`.
+   **Jangan** pakai angka di depan token (itu ID bot sendiri — bot tidak bisa
+   mengirim pesan ke dirinya sendiri). Untuk grup, tambahkan bot ke grup; ID grup
+   diawali `-`.
 3. Set environment variable lalu jalankan `watch`:
 
 ```bash
