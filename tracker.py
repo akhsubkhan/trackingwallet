@@ -57,7 +57,7 @@ TOKENS = {
     },
     "sol": {
         "USDT": ("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", 6, "tether"),
-        "USDC": ("EPjFWdd5AufqALUtJjDcoXzmYbcixMHCPXYeqNfdi36", 6, "usd-coin"),
+        "USDC": ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 6, "usd-coin"),
     },
     "tron": {
         "USDT": ("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", 6, "tether"),

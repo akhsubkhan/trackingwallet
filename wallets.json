@@ -40,6 +40,39 @@
       "name": "Vitalik Buterin (ETH)",
       "chain": "eth",
       "address": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+    },
+    {
+      "name": "Binance Hot Wallet 6 (BSC)",
+      "chain": "bsc",
+      "address": "0x8894E0a0c962CB723c1976a4421c95949bE2D4E3",
+      "tokens": [
+        "USDT"
+      ]
+    },
+    {
+      "name": "Binance Hot Wallet 20 (BSC)",
+      "chain": "bsc",
+      "address": "0xF977814e90dA44bFA03b6295A0616a897441aceC",
+      "tokens": [
+        "USDT"
+      ]
+    },
+    {
+      "name": "Binance 2 (SOL)",
+      "chain": "sol",
+      "address": "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+      "tokens": [
+        "USDT",
+        "USDC"
+      ]
+    },
+    {
+      "name": "Binance-Hot 7 (TRON)",
+      "chain": "tron",
+      "address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf",
+      "tokens": [
+        "USDT"
+      ]
     }
   ],
   "indonesia": [
@@ -49,9 +82,17 @@
       "address": ""
     },
     {
-      "name": "Indodax (ETH)",
+      "name": "Indodax 1 (ETH)",
       "chain": "eth",
-      "address": "",
+      "address": "0x51836A753E344257B361519E948ffCAF5fb8d521",
+      "tokens": [
+        "USDT"
+      ]
+    },
+    {
+      "name": "Indodax 2 (ETH)",
+      "chain": "eth",
+      "address": "0x9cbadd5ce7e14742f70414a6dcbd4e7bb8712719",
       "tokens": [
         "USDT"
       ]

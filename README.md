@@ -74,14 +74,30 @@ Setiap entri: `name`, `chain` (lihat tabel di atas), `address`, dan opsional `to
 
 Berisi alamat publik yang sudah dikenal luas: cold wallet Binance & Bitfinex,
 Robinhood, alamat genesis Satoshi, kontrak WETH,
-Binance 7, bridge Arbitrum, dan wallet Vitalik Buterin.
+Binance 7, bridge Arbitrum, dan wallet Vitalik Buterin, ditambah wallet Binance
+di chain lain:
+
+| Nama | Chain | Label explorer |
+|---|---|---|
+| Binance Hot Wallet 6 | `bsc` | BscScan "Binance: Hot Wallet 6" |
+| Binance Hot Wallet 20 | `bsc` | BscScan "Binance: Hot Wallet 20" |
+| Binance 2 | `sol` | Solscan "Binance 2" |
+| Binance-Hot 7 | `tron` | Tronscan "Binance-Hot 7" |
 
 ### Grup `indonesia`
 
-Entri exchange Indonesia (Indodax, Tokocrypto, Pintu, Reku — termasuk slot Tron dan
-BSC untuk USDT, yang banyak dipakai di Indonesia) sengaja **dikosongkan**:
+Yang sudah terisi hanya alamat yang berlabel publik di Etherscan:
+
+- **Indodax 1** (`0x5183…d521`) dan **Indodax 2** (`0x9cba…2719`): hot wallet
+  Indodax yang aktif (ratusan ribu transaksi), tapi saldonya kecil karena dana
+  langsung diteruskan. Alert akan jarang muncul dengan `--min-usd` default; pakai
+  nilai lebih kecil, mis. `--min-usd 10000`.
+
+Entri lain (Indodax BTC/Tron, Tokocrypto, Pintu, Reku) masih **dikosongkan**:
 exchange ini tidak mempublikasikan alamatnya secara resmi dan alamat hot wallet
 sering berganti, jadi alamat yang salah lebih berbahaya daripada kosong.
+(Alamat berlabel "Tokocrypto" di Etherscan sudah tidak dipakai/saldo 0; sejak
+diakuisisi Binance, dana Tokocrypto kemungkinan besar ada di wallet Binance.)
 Isi sendiri dari label yang sudah diverifikasi, misalnya:
 
 - Etherscan / BscScan / Tronscan / Solscan → cari nama exchange, lihat alamat ber-label (mis. "Indodax")
