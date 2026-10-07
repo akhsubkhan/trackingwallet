@@ -46,7 +46,8 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python3 bigbuy.py --once --min-usd "${{ vars.BIGBUY_MIN_USD || '10000' }}"
+        # BIGBUY_ARGS opsional, mis. "--smart-only" (hanya pembeli dengan rekam jejak bagus)
+        run: python3 bigbuy.py --once --min-usd "${{ vars.BIGBUY_MIN_USD || '10000' }}" ${{ vars.BIGBUY_ARGS }}
 
       - name: Save state
         if: always() && hashFiles('state.json', 'bigbuy_state.json') != ''

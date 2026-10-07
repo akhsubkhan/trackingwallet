@@ -153,6 +153,7 @@ Contoh alert:
 ```
 🟢 BELI BESAR quq · BSC DEX · $65.5K · 3x beli
 Pembeli: 0xe269470dce1f6676494f5114c80a249055ab26e5
+⭐ Rekam jejak: 4/5 token naik ≥50% (puncak rata-rata +180%, sekarang +60%)
 Dapat: 40,717,212 quq · bayar 65,546 USDT
 Token: 0x4fa7c69a7b69f8bc48233024d546bc299d6b03bf
 https://dexscreener.com/bsc/0x4fa7…
@@ -169,9 +170,33 @@ Cara kerja:
    **pengirim transaksi menerima token itu**. Add liquidity, arbitrase, dan bot
    yang menyimpan token di kontraknya otomatis tersaring.
 4. Pembeli yang menjual lagi token yang sama dalam 2 blok (sandwich/MEV) dibuang.
-5. Beberapa beli wallet yang sama untuk token yang sama dalam satu cek digabung
+5. Pembeli harus menerima ≥ 50% token yang keluar dari pool (sisanya routing/arbitrase).
+6. Beberapa beli wallet yang sama untuk token yang sama dalam satu cek digabung
    (`3x beli`). Label exchange dari `labels.json` dan tanda **wallet baru**
    (≤ 5 transaksi) ikut ditampilkan.
+
+### Rekam jejak pembeli
+
+Setiap pembelian ≥ `--track-usd` (default $5.000, walau di bawah ambang alert) dicatat
+beserta harga belinya. Tiap cek berikutnya, harga token dibaca langsung dari pool
+on-chain tempat ia membeli (V2 `getReserves`, V3 `slot0`, four.meme harga curve)
+selama **7 hari**, dan harga puncaknya disimpan. Alert lalu menampilkan:
+
+- `⭐ Rekam jejak: 4/5 token naik ≥50%`: dari token lain yang pernah dibeli wallet ini
+  (tercatat oleh tool ini, ≥ 1 jam lalu), 4 dari 5 pernah naik ≥ 50% dari harga belinya.
+  ⭐ jika ≥ setengahnya naik, 📉 jika tidak.
+- `puncak rata-rata`: rata-rata kenaikan tertinggi; `sekarang`: rata-rata posisi saat ini.
+- `Rekam jejak: belum ada`: wallet ini belum pernah tercatat membeli token lain.
+
+`--smart-only` hanya mengirim alert untuk pembeli dengan ≥ 2 token di rekam jejak
+(`--smart-min`) dan ⭐. Di GitHub Actions: buat variable `BIGBUY_ARGS` = `--smart-only`.
+
+Catatan:
+- Rekam jejak **mulai dari nol** saat tool ini mulai jalan; makin lama jalan, makin berguna.
+- Yang diukur adalah **kenaikan harga setelah wallet membeli**, bukan profit yang benar-benar
+  direalisasikan (kapan wallet menjual tidak dilacak). Token yang di-rug turun ke ~-100%.
+- Harga dicek tiap run (15 menit), jadi lonjakan singkat di antaranya bisa terlewat.
+- Token four.meme yang sudah pindah ke PancakeSwap berhenti diperbarui harganya.
 
 Di GitHub Actions, `bigbuy.py --once` ikut jalan di workflow `watch.yml` tiap 15 menit
 dan memindai semua blok sejak run sebelumnya. Ubah ambang lewat variable
