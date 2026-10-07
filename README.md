@@ -108,3 +108,79 @@ Setelah diisi, jalankan `python3 tracker.py --group indonesia balances`.
 
 > Catatan: label wallet bisa berubah dan saldo exchange tersebar di banyak alamat.
 > Angka yang tampil adalah saldo alamat yang terdaftar saja, bukan total aset exchange.
+
+## Deteksi bandar (`bandar.py`)
+
+Analisis satu token EVM (BSC / ETH) untuk mencari wallet "bandar" yang sedang
+akumulasi, lalu memberi peringkat **BANDAR SCORE** (0–100) dan alert.
+
+```
+TOKEN → holder aktif → filter exchange / LP / kontrak → wallet yang akumulasi
+      → cluster wallet → profit → sumber dana → transaksi DEX
+      → wallet lain ikut akumulasi? → BANDAR SCORE → ALERT
+```
+
+```bash
+# Analisis sekali (default jendela 24 jam, 20 wallet teratas)
+python3 bandar.py scan --chain bsc --token 0xALAMAT_TOKEN
+python3 bandar.py scan --chain eth --token 0xALAMAT_TOKEN --hours 6 --top 30 --json
+
+# Pantau terus tiap 10 menit, alert (terminal + Telegram) jika skor >= 60
+python3 bandar.py watch --chain bsc --token 0xALAMAT_TOKEN --min-score 60
+```
+
+Contoh alert (satu pesan per cluster):
+
+```
+🚨 BANDAR CATE (bsc) skor 87
+Cluster C1: 24 wallet, 12 melewati ambang (jendela 1.3 jam)
+pegangan cluster +25, akumulasi +20, cluster +15, profit +10
+• 0x0097…9b11 skor 87 | saldo 0.74% net +0.74% | B/S 13/13 | PnL $61,145
+…
+```
+
+### Cara kerja
+
+| Tahap | Yang dilakukan |
+|---|---|
+| Holder aktif | Semua event `Transfer` token di jendela waktu → arus masuk/keluar per alamat, saldo via `balanceOf` |
+| Filter | Exchange (label di `labels.json` + `wallets.json`), pool DEX (punya `token0/token1`), kontrak lain, alamat burn. Persentase dihitung dari **supply beredar** (total − burn) |
+| Transaksi DEX | Event `Swap` Uniswap/PancakeSwap V2 & V3 di pool token → beli/jual per wallet + nilai USD |
+| Profit | PnL token ini di jendela: hasil jual + nilai token yang masih dipegang − modal beli |
+| Sumber dana | USDT/USDC/WBNB/dll. yang masuk ke wallet (≥ $20) dan token yang dikirim langsung antar wallet (≥ 0,01% supply) |
+| Cluster | Wallet disatukan jika: saling kirim token, didanai wallet yang sama, atau berulang kali beli di blok yang sama. Hub yang mengirim ke >100 alamat (bot airdrop) diabaikan |
+| Ikut akumulasi | Jumlah wallet akumulasi dan berapa yang aktif di ¼ akhir jendela |
+
+**BANDAR SCORE** (maks. 100):
+
+| Komponen | Poin |
+|---|---|
+| Pegangan cluster (% supply beredar) | s/d 25 |
+| Akumulasi bersih cluster di jendela | s/d 20 |
+| Cluster (jumlah wallet terhubung) | s/d 15 |
+| Dominasi beli (beli vs jual) | s/d 10 |
+| Beli serentak di blok yang sama | s/d 10 |
+| Sumber dana (didanai wallet yang sama / terima token langsung) | s/d 10 |
+| Profit (ROI) | s/d 10 |
+| Beli ≥ 3x tanpa pernah jual | 5 |
+
+### Batasan
+
+- **Riwayat RPC.** RPC publik default (publicnode) hanya melayani log ~10.000 blok
+  terakhir: **BSC ±75 menit**, ETH ±33 jam. Jendela otomatis dipotong (ada
+  peringatan). Solusi:
+  - Jalankan `watch`: log disimpan di `cache/`, jadi riwayat terkumpul sendiri
+    selama program berjalan.
+  - Atau pakai RPC sendiri yang menyimpan riwayat (NodeReal, Ankr, Alchemy,
+    QuickNode, token pribadi publicnode, dll.):
+    `export BSC_RPC="https://..."` / `export ETH_RPC="https://..."`.
+- **Holder yang diam** (tidak bergerak di jendela) tidak terlihat; top holder yang
+  ditampilkan adalah holder yang aktif.
+- **Profit** hanya untuk token ini di jendela waktu; riwayat profit di token lain
+  butuh indexer berbayar. Harga WBNB/WETH memakai harga saat ini.
+- **Sumber dana** hanya dari token ERC-20 (stablecoin/WBNB/WETH). Pendanaan BNB/ETH
+  native tidak terlihat lewat event log.
+- Belum mendukung Uniswap V4 dan pembelian lewat bonding curve (mis. four.meme
+  sebelum listing di PancakeSwap).
+- Skor adalah **heuristik**, bukan bukti. Bot volume/MEV dan market maker bisa
+  terlihat mirip bandar. Selalu cek manual di explorer sebelum mengambil keputusan.
