@@ -1,0 +1,46 @@
+name: Whale watch
+
+on:
+  schedule:
+    # Tiap 15 menit, sengaja tidak di menit :00 (jam sibuk GitHub, delay lebih besar)
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: whale-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Saldo terakhir disimpan antar-run lewat cache (bukan commit ke repo)
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: whale-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: whale-state-
+
+      - name: Cek saldo & kirim alert
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 tracker.py watch --once --min-usd "${{ vars.MIN_USD || '1000000' }}"
+
+      - name: Save state
+        if: always() && hashFiles('state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: whale-state-${{ github.run_id }}-${{ github.run_attempt }}
