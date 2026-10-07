@@ -1,0 +1,21 @@
+{
+  "_catatan": "Daftar wallet yang dipantau. chain: btc | eth. Isi 'address' yang kosong dengan alamat yang sudah diverifikasi (lihat README).",
+  "global": [
+    {"name": "Binance Cold Wallet (BTC)", "chain": "btc", "address": "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo"},
+    {"name": "Bitfinex Cold Wallet (BTC)", "chain": "btc", "address": "bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97"},
+    {"name": "Robinhood (BTC)", "chain": "btc", "address": "bc1ql49ydapnjafl5t2cp9zqpjwe6pdgmxy98859v2"},
+    {"name": "Satoshi Genesis Address (BTC)", "chain": "btc", "address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"},
+    {"name": "Ethereum Beacon Deposit Contract", "chain": "eth", "address": "0x00000000219ab540356cBB839Cbe05303d7705Fa"},
+    {"name": "Wrapped Ether (WETH) Contract", "chain": "eth", "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"},
+    {"name": "Binance 7 (ETH)", "chain": "eth", "address": "0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8"},
+    {"name": "Arbitrum Bridge (ETH)", "chain": "eth", "address": "0x8315177aB297bA92A06054cE80a67Ed4DBd7ed3a"},
+    {"name": "Vitalik Buterin (ETH)", "chain": "eth", "address": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"}
+  ],
+  "indonesia": [
+    {"name": "Indodax (BTC)", "chain": "btc", "address": ""},
+    {"name": "Indodax (ETH)", "chain": "eth", "address": ""},
+    {"name": "Tokocrypto (ETH)", "chain": "eth", "address": ""},
+    {"name": "Pintu (ETH)", "chain": "eth", "address": ""},
+    {"name": "Reku (ETH)", "chain": "eth", "address": ""}
+  ]
+}
