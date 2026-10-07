@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""Deteksi wallet yang membeli token apa pun dalam jumlah besar di DEX (BSC / ETH).
+
+Cara kerja (tanpa API key, RPC publik):
+  1. Ambil semua Transfer token quote (WBNB/WETH/USDT/USDC/...) di rentang blok baru.
+  2. Transfer quote bernilai besar yang MASUK ke pool DEX (Uniswap/PancakeSwap V2/V3)
+     = seseorang membayar quote untuk membeli token pasangan di pool itu.
+  3. Receipt transaksi dicek: harus ada event Swap dari pool tersebut, dan pengirim
+     transaksi harus menerima token itu (menyaring add liquidity, arbitrase, bot MEV).
+  4. four.meme (BSC): event TokenPurchase dari bonding curve.
+
+Contoh:
+  python3 bigbuy.py --min-usd 10000                 # BSC + ETH, terus-menerus
+  python3 bigbuy.py --chains bsc --min-usd 25000 --once   # sekali jalan (cron)
+"""
+
+import argparse
+import json
+import re
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+
+from bandar import (EXPLORER, EXPLORER_TX, FM_BUY, FOURMEME_HELPER, FOURMEME_MANAGER, FOURMEME_V1,
+                    QUOTES, RPC, SWAP_PCS_V3, SWAP_V2, SWAP_V3, TRANSFER, batch, decode_str, eth_calls,
+                    load_labels, pad, token_usd, topic_addr, word_addr, words)
+from tracker import PRICE_API, http_json, send_telegram
+
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_STATE = BASE_DIR / "bigbuy_state.json"
+
+SWAPS = {SWAP_V2, SWAP_V3, SWAP_PCS_V3}
+CONFIRMATIONS = {"bsc": 3, "eth": 1}  # blok paling baru dilewati dulu (reorg)
+BLOCK_TIME = {"bsc": 0.45, "eth": 12.0}
+DEXSCREENER = {"bsc": "https://dexscreener.com/bsc/", "eth": "https://dexscreener.com/ethereum/"}
+
+# Token "mayor": membelinya tidak dianggap beli token (mis. USDT -> WBNB, USDC -> WETH)
+MAJORS = {
+    "bsc": set(QUOTES["bsc"]) | {
+        "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c",  # BTCB
+        "0x2170ed0880ac9a755fd29b2688956bd959f933f8",  # ETH (Binance-Peg)
+        "0x1af3f329e8be154074d8769d1ffa4ee058b1dbc3",  # DAI
+        "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",  # USDe
+        "0xa2e3356610840701bdf5611a53974510ae27e2e1",  # wBETH
+        "0xb0b84d294e0c75a6abe60171b70edeb2efd14a1b",  # slisBNB
+    },
+    "eth": set(QUOTES["eth"]) | {
+        "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",  # WBTC
+        "0xae7ab96520de3a18e5e111b5eaa95a5e3f5ee6b2",  # stETH
+        "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",  # wstETH
+        "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",  # cbBTC
+        "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",  # USDe
+        "0x9d39a5de30e57443bff2a8307a4256c8797a3497",  # sUSDe
+        "0x1abaea1f7c830bd89acc67ec4af516284b1bc33c",  # EURC
+        "0x6c3ea9036406852006290770bedfcaba0e23a0e8",  # PYUSD
+        "0xdc035d45d973e3ec169d2276ddab16f1e407384f",  # USDS
+        "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d",  # USD1
+        "0x8292bb45bf1ee4d140127049757c2e0ff06317ed",  # RLUSD
+        "0x40d16fc0246ad3160ccc09b8d0d3a2cd28ae6c2f",  # GHO
+        "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e",  # crvUSD
+        "0x853d955acef822db058eb8505911ed77f175b99e",  # FRAX
+        "0xae78736cd615f374d3085123a210448e74fc6393",  # rETH
+        "0xbe9895146f7af43049ca1c1ae358b0541ea49704",  # cbETH
+        "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",  # weETH
+    },
+}
+POOL_CACHE_MAX = 100_000
+
+
+def log(msg):
+    print(f"  .. {msg}", file=sys.stderr, flush=True)
+
+
+def fmt_usd(v):
+    if v >= 1e6:
+        return f"${v / 1e6:,.2f}M"
+    if v >= 1e3:
+        return f"${v / 1e3:,.1f}K"
+    return f"${v:,.0f}"
+
+
+def fmt_amt(v):
+    return f"{v:,.0f}" if v >= 100 else f"{v:,.4f}"
+
+
+def head_block(chain):
+    return int(http_json(RPC[chain], {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []})["result"], 16)
+
+
+def iter_logs(chain, address, topics, start, end, span):
+    """eth_getLogs per potongan blok, satu potongan di memori sekaligus.
+    Potongan mengikuti saran RPC ("retry with the range a-b") saat hasil terlalu banyak."""
+    cur, fails, max_span = start, 0, span
+    while cur <= end:
+        hi = min(end, cur + span - 1)
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_getLogs",
+                   "params": [{"address": address, "topics": topics, "fromBlock": hex(cur), "toBlock": hex(hi)}]}
+        try:
+            resp = http_json(RPC[chain], payload, timeout=90)
+            if "error" in resp:
+                raise RuntimeError(resp["error"].get("message", resp["error"]))
+        except Exception as exc:
+            m = re.search(r"range (\d+)-(\d+)", str(exc))
+            if m:
+                span = max(1, int(m.group(2)) - int(m.group(1)) + 1)
+            elif span > 1 and "max results" in str(exc):
+                span = max(1, span // 2)
+            else:
+                fails += 1
+                if fails > 5:
+                    raise
+                time.sleep(2 ** fails)
+            continue
+        fails = 0
+        yield from resp["result"]
+        cur = hi + 1
+        span = min(max_span, span + span // 4 + 1)
+
+
+# --- Info pool & token (di-cache di state antar run) -------------------------
+
+def pool_tokens(chain, addrs, cache):
+    """alamat -> [token0, token1] untuk pool V2/V3, 0 jika bukan pool."""
+    new = [a for a in dict.fromkeys(addrs) if a not in cache]
+    if new:
+        res = eth_calls(chain, [(a, sel) for a in new for sel in ("0x0dfe1681", "0xd21220a7")])
+        for i, a in enumerate(new):
+            t0, t1 = res[2 * i], res[2 * i + 1]
+            ok = t0 and t1 and len(t0) == 66 and len(t1) == 66
+            cache[a] = [topic_addr(t0), topic_addr(t1)] if ok else 0
+    return {a: cache[a] for a in addrs}
+
+
+def token_meta(chain, addrs, cache):
+    """alamat -> [simbol, desimal]"""
+    new = [a for a in dict.fromkeys(addrs) if a not in cache]
+    if new:
+        res = eth_calls(chain, [(a, sel) for a in new for sel in ("0x95d89b41", "0x313ce567")])
+        for i, a in enumerate(new):
+            sym, dec = res[2 * i], res[2 * i + 1]
+            cache[a] = [decode_str(sym)[:20] or "?", int(dec, 16) if dec and dec != "0x" else 18]
+    return cache
+
+
+def quote_prices(chain):
+    """alamat quote -> harga USD (stablecoin = 1). Quote tanpa harga dilewati."""
+    ids = {cg for _, _, cg in QUOTES[chain].values() if cg}
+    try:
+        data = http_json(PRICE_API.format(",".join(sorted(ids))))
+    except Exception as exc:
+        log(f"gagal ambil harga {chain}: {exc} (hanya stablecoin yang dicek)")
+        data = {}
+    out = {}
+    for addr, (_, _, cg) in QUOTES[chain].items():
+        price = 1.0 if cg is None else data.get(cg, {}).get("usd")
+        if price:
+            out[addr] = price
+    return out
+
+
+# --- Deteksi -----------------------------------------------------------------
+
+def dex_buys(chain, start, end, min_usd, prices, state):
+    """Beli token via pool V2/V3 yang dibayar dengan quote bernilai >= min_usd."""
+    pools_cache = state["pools"].setdefault(chain, {})
+    # Ambang per transfer lebih rendah: satu pembelian bisa dipecah ke beberapa pool
+    floor = min_usd / 4
+    cands = []  # (tx, block, pool, quote, raw, usd)
+    n = 0
+    for lg in iter_logs(chain, list(prices), [TRANSFER], start, end, span=40 if chain == "bsc" else 20):
+        n += 1
+        if len(lg["topics"]) != 3 or len(lg["data"]) < 66:
+            continue
+        q = lg["address"].lower()
+        raw = int(lg["data"][:66], 16)
+        usd = raw / 10 ** QUOTES[chain][q][1] * prices[q]
+        if usd >= floor:
+            cands.append((lg["transactionHash"], int(lg["blockNumber"], 16), topic_addr(lg["topics"][2]), q, raw, usd))
+    log(f"{chain}: {n:,} transfer quote, {len(cands):,} >= {fmt_usd(floor)}")
+    if not cands:
+        return []
+
+    pools = pool_tokens(chain, [c[2] for c in cands], pools_cache)
+    by_tx = defaultdict(list)
+    for tx, blk, pool, q, raw, usd in cands:
+        p = pools.get(pool)
+        if not p or q not in p:
+            continue
+        token = p[1] if p[0] == q else p[0]
+        if token in MAJORS[chain]:
+            continue
+        by_tx[tx].append((blk, pool, q, raw, usd, token))
+    # Hanya tx yang total quote masuk ke pool token non-mayor bisa mencapai ambang
+    by_tx = {tx: v for tx, v in by_tx.items() if sum(x[4] for x in v) >= min_usd}
+    log(f"{chain}: {len(by_tx):,} transaksi kandidat beli")
+    if not by_tx:
+        return []
+
+    # eth_getTransactionReceipt ditolak RPC publik BSC ("archive"); eth_getBlockReceipts tidak
+    blocks = sorted({v[0][0] for v in by_tx.values()})
+    receipts = {}
+    for blk, rcs in zip(blocks, batch(chain, [("eth_getBlockReceipts", [hex(b)]) for b in blocks], size=5)):
+        receipts.update({rc["transactionHash"]: rc for rc in rcs or []})
+    buys = []
+    for tx in by_tx:
+        rc = receipts.get(tx)
+        if not rc or rc.get("status") != "0x1":
+            continue
+        buyer = rc["from"].lower()
+        swapped = {lg["address"].lower() for lg in rc["logs"] if lg["topics"] and lg["topics"][0] in SWAPS}
+        per_token = defaultdict(lambda: {"usd": 0.0, "paid": defaultdict(int)})
+        for blk, pool, q, raw, usd, token in by_tx[tx]:
+            if pool in swapped:
+                per_token[token]["usd"] += usd
+                per_token[token]["paid"][q] += raw
+        for token, agg in per_token.items():
+            if agg["usd"] < min_usd:
+                continue
+            # Token harus benar-benar diterima pengirim tx (bukan kontrak bot / LP)
+            got = 0
+            for lg in rc["logs"]:
+                if (lg["address"].lower() == token and len(lg["topics"]) == 3 and lg["topics"][0] == TRANSFER
+                        and len(lg["data"]) >= 66):
+                    amt = int(lg["data"][:66], 16)
+                    got += amt if topic_addr(lg["topics"][2]) == buyer else 0
+                    got -= amt if topic_addr(lg["topics"][1]) == buyer else 0
+            if got <= 0:
+                continue
+            buys.append({"chain": chain, "tx": tx, "block": int(rc["blockNumber"], 16), "buyer": buyer,
+                         "token": token, "raw": got, "usd": agg["usd"],
+                         "paid": {QUOTES[chain][q][0]: r / 10 ** QUOTES[chain][q][1] for q, r in agg["paid"].items()}})
+    return buys
+
+
+def fourmeme_buys(start, end, min_usd, bnb_usd, state):
+    """TokenPurchase(token, account, price, amount, cost, fee, offers, funds) di bonding curve four.meme."""
+    if not bnb_usd:
+        return []
+    quotes = state.setdefault("fm_quote", {})
+    hits = []
+    for lg in iter_logs("bsc", [FOURMEME_MANAGER, FOURMEME_V1], [FM_BUY], start, end, span=2000):
+        w = words(lg["data"])
+        if len(w) < 8:
+            continue
+        # Ambang awal dengan asumsi quote BNB (quote termahal); dicek ulang setelah quote diketahui
+        if (w[4] + w[5]) / 1e18 * bnb_usd >= min_usd:
+            hits.append((lg, w))
+    if not hits:
+        return []
+    tokens = list(dict.fromkeys(word_addr(w[0]) for _, w in hits if word_addr(w[0]) not in quotes))
+    res = eth_calls("bsc", [(FOURMEME_HELPER, "0x1f69565f" + pad(t)[2:]) for t in tokens])
+    for t, raw in zip(tokens, res):
+        q = word_addr(words(raw)[2]) if raw and len(raw) >= 2 + 64 * 3 else word_addr(0)
+        quotes[t] = q
+    price_cache = {}
+    buys = []
+    for lg, w in hits:
+        token, q = word_addr(w[0]), quotes.get(word_addr(w[0]), word_addr(0))
+        if int(q, 16) == 0:
+            sym, dec, price = "BNB", 18, bnb_usd
+        elif q in QUOTES["bsc"]:
+            sym, dec, cg = QUOTES["bsc"][q]
+            price = bnb_usd if cg == "binancecoin" else 1.0 if cg is None else None
+        else:
+            if q not in price_cache:
+                price_cache[q] = token_usd("bsc", q)
+            sym, dec, price = q[:8], 18, price_cache[q]
+        if not price:
+            continue
+        paid = (w[4] + w[5]) / 10 ** dec
+        if paid * price < min_usd:
+            continue
+        buys.append({"chain": "bsc", "tx": lg["transactionHash"], "block": int(lg["blockNumber"], 16),
+                     "buyer": word_addr(w[1]), "token": token, "raw": w[3], "usd": paid * price,
+                     "paid": {sym: paid}, "fourmeme": True})
+    return buys
+
+
+def drop_mev(chain, buys, end):
+    """Buang pembeli yang menjual lagi token itu dalam 2 blok (sandwich / arbitrase)."""
+    keep = []
+    for b in buys:
+        hi = min(end, b["block"] + 2)
+        try:
+            sold = list(iter_logs(chain, b["token"], [TRANSFER, pad(b["buyer"])], b["block"], hi, span=10))
+        except Exception:
+            sold = []
+        if any(lg["transactionHash"] != b["tx"] for lg in sold):
+            continue
+        keep.append(b)
+    return keep
+
+
+# --- Alert -------------------------------------------------------------------
+
+def merge(buys):
+    """Gabungkan beberapa beli wallet yang sama untuk token yang sama dalam satu run."""
+    out = {}
+    for b in sorted(buys, key=lambda b: b["block"]):
+        k = (b["chain"], b["buyer"], b["token"])
+        if k not in out:
+            out[k] = {**b, "paid": dict(b["paid"]), "n": 1}
+            continue
+        m = out[k]
+        m["usd"] += b["usd"]
+        m["raw"] += b["raw"]
+        m["n"] += 1
+        m["tx"] = b["tx"]
+        for s, v in b["paid"].items():
+            m["paid"][s] = m["paid"].get(s, 0) + v
+    return sorted(out.values(), key=lambda b: -b["usd"])
+
+
+def alert_text(b, meta, labels, nonce):
+    sym, dec = meta.get(b["token"], ["?", 18])
+    amt = b["raw"] / 10 ** dec
+    paid = " + ".join(f"{fmt_amt(v)} {s}" for s, v in b["paid"].items())
+    who = labels.get(b["buyer"], "")
+    fresh = f" · wallet baru ({nonce} tx)" if nonce is not None and nonce <= 5 else ""
+    where = "four.meme" if b.get("fourmeme") else "DEX"
+    times = f" · {b['n']}x beli" if b["n"] > 1 else ""
+    return (f"🟢 BELI BESAR {sym} · {b['chain'].upper()} {where} · {fmt_usd(b['usd'])}{times}\n"
+            f"Pembeli: {b['buyer']}{f' ({who})' if who else ''}{fresh}\n"
+            f"Dapat: {fmt_amt(amt)} {sym} · bayar {paid}\n"
+            f"Token: {b['token']}\n"
+            f"{DEXSCREENER[b['chain']]}{b['token']}\n"
+            f"{EXPLORER_TX[b['chain']]}{b['tx']}")
+
+
+def send_alerts(chain, buys, state, max_alerts):
+    if not buys:
+        return
+    meta = token_meta(chain, [b["token"] for b in buys], state["tokens"].setdefault(chain, {}))
+    labels = load_labels()
+    shown = buys[:max_alerts]
+    nonces = batch(chain, [("eth_getTransactionCount", [b["buyer"], "latest"]) for b in shown])
+    msgs = [alert_text(b, meta, labels, int(n, 16) if n else None) for b, n in zip(shown, nonces)]
+    if len(buys) > max_alerts:
+        msgs.append(f"… +{len(buys) - max_alerts} beli besar lain di {chain.upper()} (naikkan --min-usd)")
+    for m in msgs:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {m}\n", flush=True)
+    # Satu pesan Telegram berisi beberapa alert (batas Telegram 4096 karakter)
+    chunk = ""
+    for m in msgs:
+        if chunk and len(chunk) + len(m) + 2 > 3800:
+            send_telegram(chunk, preview=False)
+            chunk = ""
+        chunk = f"{chunk}\n\n{m}" if chunk else m
+    if chunk:
+        send_telegram(chunk, preview=False)
+
+
+# --- Main --------------------------------------------------------------------
+
+def run_chain(chain, args, state):
+    head = head_block(chain) - CONFIRMATIONS[chain]
+    last = state["last"].get(chain)
+    oldest = head - int(args.max_minutes * 60 / BLOCK_TIME[chain])
+    if last is None:
+        start = head - int(args.lookback * 60 / BLOCK_TIME[chain]) + 1
+    else:
+        start = last + 1
+        if start < oldest:
+            log(f"{chain}: {oldest - start:,} blok dilewati (lebih lama dari {args.max_minutes} menit)")
+            start = oldest
+    if start > head:
+        return
+    log(f"{chain}: blok {start:,}-{head:,} ({head - start + 1:,} blok)")
+    prices = quote_prices(chain)
+    buys = dex_buys(chain, start, head, args.min_usd, prices, state)
+    if chain == "bsc":
+        wbnb = next(a for a, v in QUOTES["bsc"].items() if v[0] == "WBNB")
+        buys += fourmeme_buys(start, head, args.min_usd, prices.get(wbnb), state)
+    buys = merge(drop_mev(chain, buys, head))
+    send_alerts(chain, buys, state, args.max_alerts)
+    state["last"][chain] = head
+    log(f"{chain}: {len(buys)} beli besar")
+
+
+def load_state(path):
+    try:
+        state = json.loads(path.read_text())
+    except Exception:
+        state = {}
+    for k in ("last", "pools", "tokens"):
+        state.setdefault(k, {})
+    for chain, cache in state["pools"].items():
+        if len(cache) > POOL_CACHE_MAX:
+            state["pools"][chain] = {}
+    return state
+
+
+def main():
+    p = argparse.ArgumentParser(description="Alert wallet yang membeli token apa pun dalam jumlah besar (BSC/ETH)")
+    p.add_argument("--chains", default="bsc,eth", help="chain dipisah koma: bsc,eth (default keduanya)")
+    p.add_argument("--min-usd", type=float, default=10_000, help="nilai beli minimal dalam USD (default 10000)")
+    p.add_argument("--interval", type=int, default=60, help="detik antar cek (default 60)")
+    p.add_argument("--once", action="store_true", help="cek sekali lalu keluar (untuk cron / GitHub Actions)")
+    p.add_argument("--lookback", type=float, default=15, help="menit ke belakang saat pertama jalan (default 15)")
+    p.add_argument("--max-minutes", type=float, default=60,
+                   help="rentang maksimal per cek; RPC publik BSC hanya simpan log ~75 menit (default 60)")
+    p.add_argument("--max-alerts", type=int, default=25, help="alert maksimal per chain per cek (default 25)")
+    p.add_argument("--state", default=str(DEFAULT_STATE), help="file state (blok terakhir & cache pool)")
+    args = p.parse_args()
+    chains = [c.strip() for c in args.chains.split(",") if c.strip()]
+    for c in chains:
+        if c not in QUOTES:
+            sys.exit(f"chain tidak didukung: {c} (pilihan: {', '.join(QUOTES)})")
+    state_path = Path(args.state)
+    state = load_state(state_path)
+    print(f"Memantau beli >= {fmt_usd(args.min_usd)} di {', '.join(c.upper() for c in chains)}"
+          f"{'' if args.once else f' tiap {args.interval}s'}. Ctrl+C untuk berhenti.", flush=True)
+    while True:
+        for chain in chains:
+            try:
+                run_chain(chain, args, state)
+            except Exception as exc:
+                print(f"[error] {chain}: {exc}", file=sys.stderr, flush=True)
+            state_path.write_text(json.dumps(state))
+        if args.once:
+            break
+        time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    main()

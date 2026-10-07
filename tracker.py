@@ -241,7 +241,7 @@ def print_table(rows, prices):
 
 # --- Notifikasi Telegram --------------------------------------------------
 
-def send_telegram(text):
+def send_telegram(text, preview=True):
     """Kirim pesan jika TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID di-set."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -252,7 +252,10 @@ def send_telegram(text):
               "(lihat README bagian Notifikasi Telegram)", file=sys.stderr)
         return
     try:
-        http_json(f"https://api.telegram.org/bot{token}/sendMessage", {"chat_id": chat_id, "text": text})
+        payload = {"chat_id": chat_id, "text": text}
+        if not preview:
+            payload["link_preview_options"] = {"is_disabled": True}
+        http_json(f"https://api.telegram.org/bot{token}/sendMessage", payload)
     except urllib.error.HTTPError as exc:
         try:
             reason = json.load(exc).get("description", exc)

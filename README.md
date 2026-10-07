@@ -133,6 +133,62 @@ Setelah diisi, jalankan `python3 tracker.py --group indonesia balances`.
 > Catatan: label wallet bisa berubah dan saldo exchange tersebar di banyak alamat.
 > Angka yang tampil adalah saldo alamat yang terdaftar saja, bukan total aset exchange.
 
+## Beli token besar (`bigbuy.py`)
+
+Alert setiap kali sebuah wallet **membeli token apa pun** dalam jumlah besar di DEX
+BSC / Ethereum (PancakeSwap, Uniswap V2/V3, dan fork-nya) serta bonding curve four.meme.
+Tidak perlu tahu tokennya dulu: semua pasar dipindai.
+
+```bash
+# Terus-menerus, cek tiap 60 detik, alert beli >= $10.000 (BSC + ETH)
+python3 bigbuy.py
+
+# Atur sendiri
+python3 bigbuy.py --chains bsc --min-usd 25000 --interval 30
+python3 bigbuy.py --once            # sekali jalan (cron / GitHub Actions)
+```
+
+Contoh alert:
+
+```
+🟢 BELI BESAR quq · BSC DEX · $65.5K · 3x beli
+Pembeli: 0xe269470dce1f6676494f5114c80a249055ab26e5
+Dapat: 40,717,212 quq · bayar 65,546 USDT
+Token: 0x4fa7c69a7b69f8bc48233024d546bc299d6b03bf
+https://dexscreener.com/bsc/0x4fa7…
+https://bscscan.com/tx/0x4b95…
+```
+
+Cara kerja:
+
+1. Semua `Transfer` token quote (WBNB/USDT/USDC/BUSD/FDUSD/USD1 di BSC,
+   WETH/USDT/USDC/DAI di ETH) di blok baru diambil lewat RPC publik.
+2. Transfer quote bernilai besar yang **masuk ke pool DEX** (alamat yang punya
+   `token0/token1`) berarti seseorang membayar untuk token pasangan di pool itu.
+3. Receipt transaksi dicek: harus ada event `Swap` dari pool tersebut dan
+   **pengirim transaksi menerima token itu**. Add liquidity, arbitrase, dan bot
+   yang menyimpan token di kontraknya otomatis tersaring.
+4. Pembeli yang menjual lagi token yang sama dalam 2 blok (sandwich/MEV) dibuang.
+5. Beberapa beli wallet yang sama untuk token yang sama dalam satu cek digabung
+   (`3x beli`). Label exchange dari `labels.json` dan tanda **wallet baru**
+   (≤ 5 transaksi) ikut ditampilkan.
+
+Di GitHub Actions, `bigbuy.py --once` ikut jalan di workflow `watch.yml` tiap 15 menit
+dan memindai semua blok sejak run sebelumnya. Ubah ambang lewat variable
+`BIGBUY_MIN_USD` (default `10000`).
+
+Batasan:
+- Hanya BSC dan Ethereum. Solana dan Tron tidak bisa dipindai seperti ini dengan API
+  publik gratis (perlu indexer berbayar seperti Helius / Birdeye / TronGrid Pro).
+- Pembelian yang dibayar BNB/ETH **native langsung ke pool** (Uniswap V4,
+  PancakeSwap Infinity) belum terdeteksi. Lewat router V2/V3 tetap terdeteksi karena
+  router mengubahnya ke WBNB/WETH dulu.
+- Beli token mayor (WBNB, BTCB, stablecoin, stETH, dll.) tidak dianggap beli token.
+- RPC publik BSC hanya menyimpan log ±75 menit; jika jeda antar cek lebih dari
+  60 menit (`--max-minutes`), blok yang lebih lama dilewati.
+- Token Binance Alpha sering dibeli berulang oleh wallet farming volume; alert-nya
+  asli (memang beli), tapi belum tentu "smart money".
+
 ## Deteksi bandar (`bandar.py`)
 
 Analisis satu token EVM (BSC / ETH) untuk mencari wallet "bandar" yang sedang

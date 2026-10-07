@@ -16,7 +16,7 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +28,9 @@ jobs:
       - name: Restore state
         uses: actions/cache/restore@v4
         with:
-          path: state.json
+          path: |
+            state.json
+            bigbuy_state.json
           key: whale-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: whale-state-
 
@@ -38,9 +40,19 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python3 tracker.py watch --once --min-usd "${{ vars.MIN_USD || '1000000' }}"
 
+      # Wallet yang membeli token apa pun >= BIGBUY_MIN_USD di DEX BSC/ETH sejak run sebelumnya
+      - name: Cek beli token besar
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 bigbuy.py --once --min-usd "${{ vars.BIGBUY_MIN_USD || '10000' }}"
+
       - name: Save state
-        if: always() && hashFiles('state.json') != ''
+        if: always() && hashFiles('state.json', 'bigbuy_state.json') != ''
         uses: actions/cache/save@v4
         with:
-          path: state.json
+          path: |
+            state.json
+            bigbuy_state.json
           key: whale-state-${{ github.run_id }}-${{ github.run_attempt }}
