@@ -148,17 +148,32 @@ python3 bigbuy.py --chains bsc --min-usd 25000 --interval 30
 python3 bigbuy.py --once            # sekali jalan (cron / GitHub Actions)
 ```
 
-Contoh alert:
+Satu alert **per token** per cek: semua pembelian token itu dijumlahkan.
 
 ```
-🟢 BELI BESAR quq · BSC DEX · $65.5K · 3x beli
-Pembeli: 0xe269470dce1f6676494f5114c80a249055ab26e5
-⭐ Rekam jejak: 4/5 token naik ≥50% (puncak rata-rata +180%, sekarang +60%)
-Dapat: 40,717,212 quq · bayar 65,546 USDT
-Token: 0x4fa7c69a7b69f8bc48233024d546bc299d6b03bf
-https://dexscreener.com/bsc/0x4fa7…
-https://bscscan.com/tx/0x4b95…
+🟢 AKUMULASI 登月 · BSC · $118.2K
+38 wallet · 81x beli · ±12 menit terakhir
+Total: 221,999,081 登月 (22.20% supply)
+24 jam: $410.5K dari 96 wallet
+• 0x6fa4…6220 $7.4K 5x ⭐3/4
+• 0x5736…951b $6.2K 4x 🆕
+• 0x7f28…b392 $6.1K 4x
+• 0x8595…bb47 $5.8K 4x 📉0/2
+• 0x1930…cca6 $5.4K 3x (Binance Hot Wallet 10)
+… +33 wallet lain ($87.4K)
+0xa91d549aeb83dc058c12157449be2a677ee60a4a
 ```
+
+| Bagian | Artinya |
+|---|---|
+| `AKUMULASI` / `BELI BESAR` | ≥ 2 wallet / 1 wallet membeli token ini di cek ini |
+| `$118.2K` | Total beli token ini sejak cek sebelumnya (±15 menit); alert jika ≥ `--min-usd` |
+| `81x beli` · `Total` · `% supply` | Jumlah transaksi, total token dibeli, dan persentasenya dari total supply |
+| `24 jam` | Total beli token ini 24 jam terakhir (semua cek), muncul jika lebih besar dari cek ini |
+| `• 0x6fa4…6220 $7.4K 5x` | Pembeli (5 terbesar), total belinya, berapa kali beli. Alamat & nominal bisa diklik (explorer / tx terakhir); nama token → DexScreener |
+| `⭐3/4` / `📉0/2` | Rekam jejak (lihat bawah) · `🆕` wallet baru (≤ 5 transaksi) · `(…)` label exchange |
+
+Hanya pembelian ≥ `--track-usd` per wallet (default $2.000) yang ikut dihitung.
 
 Cara kerja:
 
@@ -177,19 +192,17 @@ Cara kerja:
 
 ### Rekam jejak pembeli
 
-Setiap pembelian ≥ `--track-usd` (default $5.000, walau di bawah ambang alert) dicatat
+Setiap pembelian ≥ `--track-usd` (default $2.000) dicatat
 beserta harga belinya. Tiap cek berikutnya, harga token dibaca langsung dari pool
 on-chain tempat ia membeli (V2 `getReserves`, V3 `slot0`, four.meme harga curve)
 selama **7 hari**, dan harga puncaknya disimpan. Alert lalu menampilkan:
 
-- `⭐ Rekam jejak: 4/5 token naik ≥50%`: dari token lain yang pernah dibeli wallet ini
-  (tercatat oleh tool ini, ≥ 1 jam lalu), 4 dari 5 pernah naik ≥ 50% dari harga belinya.
-  ⭐ jika ≥ setengahnya naik, 📉 jika tidak.
-- `puncak rata-rata`: rata-rata kenaikan tertinggi; `sekarang`: rata-rata posisi saat ini.
-- `Rekam jejak: belum ada`: wallet ini belum pernah tercatat membeli token lain.
+- `⭐4/5`: dari token lain yang pernah dibeli wallet ini (tercatat oleh tool ini, ≥ 1 jam
+  lalu), 4 dari 5 pernah naik ≥ 50% dari harga belinya. ⭐ jika ≥ setengahnya naik, 📉 jika tidak.
+- Tanpa tanda: wallet ini belum pernah tercatat membeli token lain.
 
-`--smart-only` hanya mengirim alert untuk pembeli dengan ≥ 2 token di rekam jejak
-(`--smart-min`) dan ⭐. Di GitHub Actions: buat variable `BIGBUY_ARGS` = `--smart-only`.
+`--smart-only` hanya mengirim alert token yang dibeli minimal satu pembeli dengan ≥ 2 token
+di rekam jejak (`--smart-min`) dan ⭐. Di GitHub Actions: buat variable `BIGBUY_ARGS` = `--smart-only`.
 
 Catatan:
 - Rekam jejak **mulai dari nol** saat tool ini mulai jalan; makin lama jalan, makin berguna.
