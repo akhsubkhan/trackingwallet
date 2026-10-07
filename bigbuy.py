@@ -17,7 +17,9 @@ Contoh:
 """
 
 import argparse
+import html
 import json
+import os
 import re
 import sys
 import time
@@ -446,43 +448,112 @@ def merge(buys):
     return sorted(out.values(), key=lambda b: -b["usd"])
 
 
-def alert_text(b, meta, labels, nonce):
-    sym, dec = meta.get(b["token"], ["?", 18])
-    amt = b["raw"] / 10 ** dec
-    paid = " + ".join(f"{fmt_amt(v)} {s}" for s, v in b["paid"].items())
-    who = labels.get(b["buyer"], "")
-    fresh = f" · wallet baru ({nonce} tx)" if nonce is not None and nonce <= 5 else ""
-    where = "four.meme" if b.get("fourmeme") else "DEX"
-    times = f" · {b['n']}x beli" if b["n"] > 1 else ""
-    return (f"🟢 BELI BESAR {sym} · {b['chain'].upper()} {where} · {fmt_usd(b['usd'])}{times}\n"
-            f"Pembeli: {b['buyer']}{f' ({who})' if who else ''}{fresh}\n"
-            f"{record_text(b['record'])}\n"
-            f"Dapat: {fmt_amt(amt)} {sym} · bayar {paid}\n"
-            f"Token: {b['token']}\n"
-            f"{DEXSCREENER[b['chain']]}{b['token']}\n"
-            f"{EXPLORER_TX[b['chain']]}{b['tx']}")
+FLOW_HOURS = 24        # ringkasan "24 jam" per token
+MAX_FLOWS = 100_000
+TOP_BUYERS = 5
 
 
-def send_alerts(chain, buys, meta, max_alerts):
-    if not buys:
+def link(text, url):
+    return f'<a href="{url}">{html.escape(text)}</a>'
+
+
+def plain(text):
+    return html.unescape(re.sub("<[^>]+>", "", text))
+
+
+def short(addr):
+    return addr[:6] + "…" + addr[-4:]
+
+
+def record_badge(stats):
+    n, wins = stats[:2]
+    return "" if not n else f" {'⭐' if wins / n >= 0.5 else '📉'}{wins}/{n}"
+
+
+def group_by_token(buys):
+    """Pembelian satu run -> satu grup per token, urut total USD terbesar."""
+    groups = defaultdict(list)
+    for b in buys:
+        groups[b["token"]].append(b)
+    out = []
+    for token, rows in groups.items():
+        rows.sort(key=lambda b: -b["usd"])
+        out.append({"token": token, "buys": rows, "usd": sum(b["usd"] for b in rows),
+                    "raw": sum(b["raw"] for b in rows), "n_tx": sum(b["n"] for b in rows),
+                    "fourmeme": any(b.get("fourmeme") for b in rows)})
+    return sorted(out, key=lambda g: -g["usd"])
+
+
+def record_flows(chain, buys, state, now):
+    flows = state.setdefault("flows", {}).setdefault(chain, [])
+    flows += [[now, b["token"], b["buyer"], b["usd"]] for b in buys]
+    cutoff = now - FLOW_HOURS * 3600
+    flows[:] = [f for f in flows if f[0] >= cutoff][-MAX_FLOWS:]
+
+
+def flow_24h(chain, state, token):
+    rows = [f for f in state.get("flows", {}).get(chain, []) if f[1] == token]
+    return sum(f[3] for f in rows), len({f[2] for f in rows})
+
+
+def group_text(chain, g, meta, labels, nonces, supply, minutes, day):
+    sym, dec = meta.get(g["token"], ["?", 18])
+    amt = g["raw"] / 10 ** dec
+    n_wallet = len(g["buys"])
+    title = "AKUMULASI" if n_wallet > 1 else "BELI BESAR"
+    where = " four.meme" if g["fourmeme"] else ""
+    share = amt / supply * 100 if supply else None
+    pct = ("" if share is None or share > 100 else  # > 100%: totalSupply token tidak wajar
+           " (<0.01% supply)" if share < 0.01 else f" ({share:.2f}% supply)")
+    lines = [f"🟢 <b>{title} {link(sym, DEXSCREENER[chain] + g['token'])}</b> · {chain.upper()}{where} · "
+             f"<b>{fmt_usd(g['usd'])}</b>",
+             f"{n_wallet} wallet · {g['n_tx']}x beli · ±{minutes} menit terakhir",
+             f"Total: {fmt_amt(amt)} {html.escape(sym)}{pct}"]
+    day_usd, day_wallets = day
+    if day_usd > g["usd"] * 1.01:
+        lines.append(f"24 jam: {fmt_usd(day_usd)} dari {day_wallets} wallet")
+    for b in g["buys"][:TOP_BUYERS]:
+        nonce = nonces.get(b["buyer"])
+        who = labels.get(b["buyer"])
+        extra = ("" if b["n"] == 1 else f" {b['n']}x") + record_badge(b["record"])
+        extra += " 🆕" if nonce is not None and nonce <= 5 else ""
+        extra += f" ({html.escape(who)})" if who else ""
+        lines.append(f"• {link(short(b['buyer']), EXPLORER[chain] + b['buyer'])} "
+                     f"{link(fmt_usd(b['usd']), EXPLORER_TX[chain] + b['tx'])}{extra}")
+    rest = g["buys"][TOP_BUYERS:]
+    if rest:
+        lines.append(f"… +{len(rest)} wallet lain ({fmt_usd(sum(b['usd'] for b in rest))})")
+    lines.append(html.escape(g["token"]))
+    return "\n".join(lines)
+
+
+def send_alerts(chain, groups, meta, state, max_alerts, minutes):
+    if not groups:
         return
     labels = load_labels()
-    shown = buys[:max_alerts]
-    nonces = batch(chain, [("eth_getTransactionCount", [b["buyer"], "latest"]) for b in shown])
-    msgs = [alert_text(b, meta, labels, int(n, 16) if n else None) for b, n in zip(shown, nonces)]
-    if len(buys) > max_alerts:
-        msgs.append(f"… +{len(buys) - max_alerts} beli besar lain di {chain.upper()} (naikkan --min-usd)")
+    shown = groups[:max_alerts]
+    buyers = list(dict.fromkeys(b["buyer"] for g in shown for b in g["buys"][:TOP_BUYERS]))
+    nonces = {a: int(n, 16) for a, n in zip(buyers, batch(chain, [("eth_getTransactionCount", [a, "latest"])
+                                                                  for a in buyers])) if n}
+    supplies = eth_calls(chain, [(g["token"], "0x18160ddd") for g in shown])  # totalSupply()
+    msgs = []
+    for g, sup in zip(shown, supplies):
+        dec = meta.get(g["token"], ["?", 18])[1]
+        supply = int(sup, 16) / 10 ** dec if sup and sup != "0x" else 0
+        msgs.append(group_text(chain, g, meta, labels, nonces, supply, minutes, flow_24h(chain, state, g["token"])))
+    if len(groups) > max_alerts:
+        msgs.append(f"… +{len(groups) - max_alerts} token lain di {chain.upper()} (naikkan --min-usd)")
     for m in msgs:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {m}\n", flush=True)
-    # Satu pesan Telegram berisi beberapa alert (batas Telegram 4096 karakter)
-    chunk = ""
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {plain(m)}\n", flush=True)
+    # Satu pesan Telegram berisi beberapa token (batas Telegram 4096 karakter)
+    chunks = [""]
     for m in msgs:
-        if chunk and len(chunk) + len(m) + 2 > 3800:
-            send_telegram(chunk, preview=False)
-            chunk = ""
-        chunk = f"{chunk}\n\n{m}" if chunk else m
-    if chunk:
-        send_telegram(chunk, preview=False)
+        if chunks[-1] and len(chunks[-1]) + len(m) + 2 > 3800:
+            chunks.append("")
+        chunks[-1] = f"{chunks[-1]}\n\n{m}" if chunks[-1] else m
+    for c in chunks:
+        if not send_telegram(c, preview=False, html=True) and os.environ.get("TELEGRAM_BOT_TOKEN"):
+            send_telegram(plain(c), preview=False)  # HTML ditolak: kirim ulang sebagai teks biasa
 
 
 # --- Main --------------------------------------------------------------------
@@ -513,19 +584,18 @@ def run_chain(chain, args, state):
     meta = token_meta(chain, [b["token"] for b in buys], state["tokens"].setdefault(chain, {}))
     n_live, n_priced = update_positions(chain, state, prices, now)
     recs = track_records(chain, state, now)
-    alerts = []
     for b in buys:
-        if b["usd"] < args.min_usd:
-            continue
         b["record"] = record_stats(recs, b["buyer"], b["token"])
-        n, wins = b["record"][:2]
-        if args.smart_only and not (n >= args.smart_min and wins / n >= 0.5):
-            continue
-        alerts.append(b)
+    smart = lambda b: b["record"][0] >= max(1, args.smart_min) and b["record"][1] / b["record"][0] >= 0.5
     record_buys(chain, buys, meta, state, now)
-    send_alerts(chain, alerts, meta, args.max_alerts)
+    record_flows(chain, buys, state, now)
+    # Satu alert per token: total semua pembelian token itu di run ini >= --min-usd
+    alerts = [g for g in group_by_token(buys)
+              if g["usd"] >= args.min_usd and (not args.smart_only or any(smart(b) for b in g["buys"]))]
+    minutes = max(1, round((head - start + 1) * BLOCK_TIME[chain] / 60))
+    send_alerts(chain, alerts, meta, state, args.max_alerts, minutes)
     state["last"][chain] = head
-    log(f"{chain}: {len(alerts)} alert, {len(buys)} beli tercatat; "
+    log(f"{chain}: {len(alerts)} token di-alert, {len(buys)} beli tercatat; "
         f"{n_live:,} pembelian dipantau ({n_priced:,} pool berhasil dicek harganya)")
 
 
@@ -545,15 +615,16 @@ def load_state(path):
 def main():
     p = argparse.ArgumentParser(description="Alert wallet yang membeli token apa pun dalam jumlah besar (BSC/ETH)")
     p.add_argument("--chains", default="bsc,eth", help="chain dipisah koma: bsc,eth (default keduanya)")
-    p.add_argument("--min-usd", type=float, default=10_000, help="nilai beli minimal dalam USD (default 10000)")
+    p.add_argument("--min-usd", type=float, default=10_000,
+                   help="alert jika total beli satu token dalam satu cek >= ini (USD, default 10000)")
     p.add_argument("--interval", type=int, default=60, help="detik antar cek (default 60)")
     p.add_argument("--once", action="store_true", help="cek sekali lalu keluar (untuk cron / GitHub Actions)")
     p.add_argument("--lookback", type=float, default=15, help="menit ke belakang saat pertama jalan (default 15)")
     p.add_argument("--max-minutes", type=float, default=60,
                    help="rentang maksimal per cek; RPC publik BSC hanya simpan log ~75 menit (default 60)")
-    p.add_argument("--max-alerts", type=int, default=25, help="alert maksimal per chain per cek (default 25)")
-    p.add_argument("--track-usd", type=float, default=5_000,
-                   help="pembelian >= ini dicatat untuk rekam jejak walau di bawah --min-usd (default 5000)")
+    p.add_argument("--max-alerts", type=int, default=25, help="token maksimal di-alert per chain per cek (default 25)")
+    p.add_argument("--track-usd", type=float, default=2_000,
+                   help="pembelian per wallet >= ini ikut dihitung di total token & rekam jejak (default 2000)")
     p.add_argument("--smart-only", action="store_true",
                    help="hanya alert pembeli yang rekam jejaknya bagus (>= setengah token naik >= 50%%)")
     p.add_argument("--smart-min", type=int, default=2,
