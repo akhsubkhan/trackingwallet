@@ -26,7 +26,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from bandar import (CG_PLATFORM, EXPLORER, EXPLORER_TX, FM_BUY, FOURMEME_HELPER, FOURMEME_MANAGER, FOURMEME_V1,
@@ -443,6 +443,100 @@ def record_text(stats):
             f"(puncak rata-rata {pct(peak)}, sekarang {pct(cur)})")
 
 
+# --- Deteksi volume diputar (wash) --------------------------------------------
+
+FUND_LOOKBACK_MIN = 10   # dana masuk ke pembeli sampai 10 menit sebelum cek ini
+HUB_SENDERS = 15         # pendana yang menerima dari >= sekian alamat = hub/exchange, bukan satu operator
+WASH_HOURS = 24          # token yang ketahuan diputar dicoret dari TOP 5 selama ini
+
+
+def find_funders(chain, buys, start, end, prices, state, labels):
+    """pembeli -> wallet yang paling banyak mengirim quote (USDT/WBNB/...) sebelum ia membeli.
+    Pool DEX dan wallet berlabel (exchange, dll.) tidak dihitung sebagai pendana."""
+    first = {}
+    for b in buys:
+        first[b["buyer"]] = min(first.get(b["buyer"], b["block"]), b["block"])
+    if not first or not prices:
+        return {}
+    lo = max(0, start - int(FUND_LOOKBACK_MIN * 60 / BLOCK_TIME[chain]))
+    pools = state["pools"].get(chain, {})
+    got = defaultdict(lambda: defaultdict(float))
+    buyers = list(first)
+    for i in range(0, len(buyers), 100):
+        topics = [TRANSFER, None, [pad(a) for a in buyers[i:i + 100]]]
+        for lg in iter_logs(chain, list(prices), topics, lo, end, span=1000):
+            if len(lg["topics"]) != 3 or len(lg["data"]) < 66:
+                continue
+            to, frm = topic_addr(lg["topics"][2]), topic_addr(lg["topics"][1])
+            if int(lg["blockNumber"], 16) > first.get(to, -1) or pools.get(frm) or frm in labels:
+                continue
+            q = lg["address"].lower()
+            got[to][frm] += int(lg["data"][:66], 16) / 10 ** QUOTES[chain][q][1] * prices[q]
+    return {b: max(src, key=src.get) for b, src in got.items() if src}
+
+
+def flag_wash(chain, groups, funders, prices, start, end, state, now):
+    """Tandai token yang pembelinya didanai satu wallet (g['funder']) dan, jika pendana itu juga
+    menerima quote dari pool token tersebut (= menjual lalu mendanai pembeli baru), g['wash']."""
+    top = {}
+    for g in groups:
+        buyers = [b["buyer"] for b in g["buys"]]
+        cnt = Counter(funders[b] for b in buyers if b in funders)
+        if cnt:
+            f, n = cnt.most_common(1)[0]
+            if n >= 3 and n >= 0.3 * len(buyers):
+                top[g["token"]] = (f, n, len(buyers))
+    if not top:
+        return
+    lo = max(0, start - int(FUND_LOOKBACK_MIN * 60 / BLOCK_TIME[chain]))
+    # Hot wallet exchange juga mendanai banyak pembeli, tapi menerima dari banyak alamat berbeda
+    pools_cache = state["pools"].get(chain, {})
+    senders = defaultdict(set)
+    cand = sorted({f for f, _, _ in top.values()})
+    for lg in iter_logs(chain, list(prices), [TRANSFER, None, [pad(f) for f in cand]], lo, end, span=1000):
+        if len(lg["topics"]) == 3 and not pools_cache.get(topic_addr(lg["topics"][1])):
+            senders[topic_addr(lg["topics"][2])].add(topic_addr(lg["topics"][1]))
+    hubs = {f for f in cand if len(senders[f]) >= HUB_SENDERS}
+    suspects = {}
+    for g in groups:
+        if g["token"] in top and top[g["token"]][0] not in hubs:
+            f, n, total = top[g["token"]]
+            g["funder"] = (f, n, total)
+            pools = {b["pool"] for b in g["buys"] if b.get("pool", "fourmeme") != "fourmeme"}
+            if pools:
+                suspects[g["token"]] = (f, pools)
+    if suspects:
+        all_pools = sorted({p for _, ps in suspects.values() for p in ps})
+        all_funders = sorted({f for f, _ in suspects.values()})
+        sold = set()
+        topics = [TRANSFER, [pad(p) for p in all_pools], [pad(f) for f in all_funders]]
+        for lg in iter_logs(chain, list(prices), topics, lo, end, span=1000):
+            if len(lg["topics"]) == 3:
+                sold.add((topic_addr(lg["topics"][1]), topic_addr(lg["topics"][2])))
+        for g in groups:
+            f, pools = suspects.get(g["token"], (None, ()))
+            g["wash"] = any((p, f) in sold for p in pools)
+    # token -> [waktu, pendana, jumlah pembeli didanai, total pembeli, diputar?]; yang diputar tidak ditimpa
+    funded = state.setdefault("funded", {}).setdefault(chain, {})
+    for g in groups:
+        if g.get("funder") and not (funded.get(g["token"]) or [0] * 5)[4]:
+            f, n, total = g["funder"]
+            funded[g["token"]] = [now, f, n, total, bool(g.get("wash"))]
+    for t in [t for t, v in funded.items() if now - v[0] > WASH_HOURS * 3600]:
+        del funded[t]
+
+
+def funder_lines(chain, g):
+    if not g.get("funder"):
+        return []
+    f, n, total = g["funder"]
+    who = link(short(f), EXPLORER[chain] + f)
+    lines = [f"⚠️ {n}/{total} pembeli didanai 1 wallet {who}"]
+    if g.get("wash"):
+        lines.append("🚫 Volume diputar: pendana itu juga menjual ke pool token ini")
+    return lines
+
+
 # --- Alert -------------------------------------------------------------------
 
 def merge(buys):
@@ -546,6 +640,7 @@ def group_text(chain, g, meta, labels, nonces, supply, minutes, day, names=None)
     rest = g["buys"][TOP_BUYERS:]
     if rest:
         lines.append(f"… +{len(rest)} wallet lain ({fmt_usd(sum(b['usd'] for b in rest))})")
+    lines += funder_lines(chain, g)
     lines.append(html.escape(g["token"]))
     return "\n".join(lines)
 
@@ -804,7 +899,9 @@ def top_tokens(chain, state, prices, now, n=5):
     for _, token, v_in, v_out in state.get("volume", {}).get(chain, []):
         vol[token][0] += v_in
         vol[token][1] += v_out
-    cands = {t: d for t, d in by.items() if len(d["buyers"]) >= 3 and d["pool"]}
+    funded = state.get("funded", {}).get(chain, {})
+    cands = {t: d for t, d in by.items()
+             if len(d["buyers"]) >= 3 and d["pool"] and not (funded.get(t) or [0] * 5)[4]}  # diputar: dicoret
     if not cands:
         return []
     liq = pool_liquidity(chain, [(t, d["pool"], d["q"]) for t, d in cands.items()], prices)
@@ -831,6 +928,10 @@ def top_tokens(chain, state, prices, now, n=5):
                  + 20 * min(math.log10(liquidity / MIN_LIQUIDITY), 1)
                  + (15 * min(max((mom + 0.2) / 0.7, 0), 1) if mom is not None else 7.5))
         warn = []
+        if t in funded:
+            f, n, total = funded[t][1:4]
+            score -= 10
+            warn.append(f"{n}/{total} pembeli didanai 1 wallet {link(short(f), EXPLORER[chain] + f)}")
         top_share = max(d["buyers"].values()) / d["usd"]
         if top_share > 0.5:
             score -= 10
@@ -953,8 +1054,14 @@ def run_chain(chain, args, state):
     record_buys(chain, buys, meta, state, now)
     record_flows(chain, buys, state, now)
     record_volume(chain, volume, state, now)
+    groups = group_by_token(buys)
+    try:
+        funders = find_funders(chain, buys, start, head, prices, state, load_labels())
+        flag_wash(chain, groups, funders, prices, start, head, state, now)
+    except Exception as exc:
+        log(f"{chain}: cek pendana gagal: {exc}")
     # Satu alert per token: total semua pembelian token itu di run ini >= --min-usd
-    alerts = [g for g in group_by_token(buys)
+    alerts = [g for g in groups
               if g["usd"] >= args.min_usd and (not args.smart_only or any(is_smart(b["record"], args.smart_min) for b in g["buys"]))]
     minutes = max(1, round((head - start + 1) * BLOCK_TIME[chain] / 60))
     send_alerts(chain, alerts, meta, state, args.max_alerts, minutes)

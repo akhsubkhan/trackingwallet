@@ -211,6 +211,27 @@ Catatan:
 - Harga dicek tiap run (15 menit), jadi lonjakan singkat di antaranya bisa terlewat.
 - Token four.meme yang sudah pindah ke PancakeSwap berhenti diperbarui harganya.
 
+### Deteksi volume diputar (wash trading)
+
+Setiap cek, untuk semua pembeli dicari wallet yang mengirim USDT/WBNB/dll. kepadanya
+sampai 10 menit sebelum ia membeli (pendana). Pool DEX, wallet berlabel, dan **hub**
+(pendana yang menerima dana dari ≥ 15 alamat berbeda, ciri hot wallet exchange) tidak
+dihitung.
+
+```
+⚠️ 11/11 pembeli didanai 1 wallet 0xb406…07ef
+🚫 Volume diputar: pendana itu juga menjual ke pool token ini
+```
+
+- `⚠️ N/M pembeli didanai 1 wallet`: ≥ 3 pembeli dan ≥ 30% pembeli token itu didanai
+  wallet yang sama → kemungkinan satu operator memakai banyak wallet. Di TOP 5: skor −10.
+- `🚫 Volume diputar`: pendana itu juga menerima quote dari pool token tersebut (menjual
+  token, lalu membagi hasilnya ke wallet baru yang membeli lagi). "Banyak wallet
+  akumulasi" di token ini palsu; token **dicoret dari TOP 5 selama 24 jam**.
+
+Pendanaan BNB/ETH native tidak terlihat lewat event log, jadi operator yang mendanai
+dengan BNB native belum tertangkap.
+
 ### TOP 5 sinyal akumulasi (tiap jam)
 
 Sekali per jam (`--top-every`, menit; `0` = mati) dikirim peringkat 5 token per chain
@@ -238,9 +259,9 @@ Dibeli oleh: KOL @budi, moonboy.bnb, smart money 0x6fa4…6220 ⭐3/4
 | Pembeli dengan rekam jejak ⭐ | s/d 20 (3 wallet = penuh) |
 | Likuiditas pool (sisi quote; four.meme: dana di curve) | s/d 20 ($20K = 0, $200K = penuh) |
 | Harga sekarang vs harga beli (median pembeli) | s/d 15 (−20% = 0, +50% = penuh) |
-| ⚠️ 1 wallet > 50% pembelian / > 50% pembeli wallet baru (bundle/bot) | −10 masing-masing |
+| ⚠️ 1 wallet > 50% pembelian / > 50% pembeli wallet baru (bundle/bot) / pembeli didanai 1 wallet | −10 masing-masing |
 
-Token **dicoret** jika: skor < 30, < 3 wallet pembeli, tidak net beli (beli harus ≥ 1,1× jual),
+Token **dicoret** jika: volume diputar (24 jam), skor < 30, < 3 wallet pembeli, tidak net beli (beli harus ≥ 1,1× jual),
 likuiditas < $20K, atau harga median turun > 30% dari harga beli (indikasi rug).
 
 > ⚠️ Ini peringkat sinyal, **bukan rekomendasi beli**. Tool ini tidak memeriksa kontrak
