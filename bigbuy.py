@@ -19,6 +19,7 @@ Contoh:
 import argparse
 import html
 import json
+import math
 import os
 import re
 import sys
@@ -178,11 +179,13 @@ def quote_prices(chain):
 # --- Deteksi -----------------------------------------------------------------
 
 def dex_buys(chain, start, end, min_usd, prices, state):
-    """Beli token via pool V2/V3 yang dibayar dengan quote bernilai >= min_usd."""
+    """Beli token via pool V2/V3 yang dibayar dengan quote bernilai >= min_usd.
+    Juga mengembalikan volume per token {token: [quote masuk pool, quote keluar pool]} untuk arus bersih."""
     pools_cache = state["pools"].setdefault(chain, {})
     # Ambang per transfer lebih rendah: satu pembelian bisa dipecah ke beberapa pool
     floor = min_usd / 4
     cands = []  # (tx, block, pool, quote, raw, usd)
+    outs = []   # (pool, quote, usd): quote keluar dari pool = token dijual
     n = 0
     for lg in iter_logs(chain, list(prices), [TRANSFER], start, end, span=40 if chain == "bsc" else 20):
         n += 1
@@ -193,11 +196,20 @@ def dex_buys(chain, start, end, min_usd, prices, state):
         usd = raw / 10 ** QUOTES[chain][q][1] * prices[q]
         if usd >= floor:
             cands.append((lg["transactionHash"], int(lg["blockNumber"], 16), topic_addr(lg["topics"][2]), q, raw, usd))
+            outs.append((topic_addr(lg["topics"][1]), q, usd))
     log(f"{chain}: {n:,} transfer quote, {len(cands):,} >= {fmt_usd(floor)}")
     if not cands:
-        return []
+        return [], {}
 
-    pools = pool_tokens(chain, [c[2] for c in cands], pools_cache)
+    pools = pool_tokens(chain, [c[2] for c in cands] + [o[0] for o in outs], pools_cache)
+    volume = defaultdict(lambda: [0.0, 0.0])  # sama-sama transfer >= floor: beli vs jual sebanding
+    for side, rows in ((0, [(c[2], c[3], c[5]) for c in cands]), (1, outs)):
+        for pool, q, usd in rows:
+            p = pools.get(pool)
+            if p and q in p:
+                token = p[1] if p[0] == q else p[0]
+                if token not in MAJORS[chain]:
+                    volume[token][side] += usd
     by_tx = defaultdict(list)
     for tx, blk, pool, q, raw, usd in cands:
         p = pools.get(pool)
@@ -211,7 +223,7 @@ def dex_buys(chain, start, end, min_usd, prices, state):
     by_tx = {tx: v for tx, v in by_tx.items() if sum(x[4] for x in v) >= min_usd}
     log(f"{chain}: {len(by_tx):,} transaksi kandidat beli")
     if not by_tx:
-        return []
+        return [], volume
 
     # eth_getTransactionReceipt ditolak RPC publik BSC ("archive"); eth_getBlockReceipts tidak
     blocks = sorted({v[0][0] for v in by_tx.values()})
@@ -251,7 +263,7 @@ def dex_buys(chain, start, end, min_usd, prices, state):
             buys.append({"chain": chain, "tx": tx, "block": int(rc["blockNumber"], 16), "buyer": buyer,
                          "token": token, "raw": got, "usd": agg["usd"], "pool": pool, "quote": q,
                          "paid": {QUOTES[chain][q][0]: r / 10 ** QUOTES[chain][q][1] for q, r in agg["paid"].items()}})
-    return buys
+    return buys, volume
 
 
 def fourmeme_buys(start, end, min_usd, bnb_usd, state):
@@ -486,9 +498,16 @@ def group_by_token(buys):
 
 def record_flows(chain, buys, state, now):
     flows = state.setdefault("flows", {}).setdefault(chain, [])
-    flows += [[now, b["token"], b["buyer"], b["usd"]] for b in buys]
+    flows += [[now, b["token"], b["buyer"], b["usd"], b["pool"], b["quote"]] for b in buys]
     cutoff = now - FLOW_HOURS * 3600
     flows[:] = [f for f in flows if f[0] >= cutoff][-MAX_FLOWS:]
+
+
+def record_volume(chain, volume, state, now):
+    rows = state.setdefault("volume", {}).setdefault(chain, [])
+    rows += [[now, token, v[0], v[1]] for token, v in volume.items()]
+    cutoff = now - FLOW_HOURS * 3600
+    rows[:] = [r for r in rows if r[0] >= cutoff][-MAX_FLOWS:]
 
 
 def flow_24h(chain, state, token):
@@ -556,6 +575,125 @@ def send_alerts(chain, groups, meta, state, max_alerts, minutes):
             send_telegram(plain(c), preview=False)  # HTML ditolak: kirim ulang sebagai teks biasa
 
 
+# --- Top 5 (ringkasan per jam) ------------------------------------------------
+
+MIN_LIQUIDITY = 20_000   # USD sisi quote; di bawah ini terlalu tipis untuk dibeli/dijual
+MIN_SCORE = 30           # skor di bawah ini tidak masuk TOP 5
+
+
+def pool_liquidity(chain, items, prices):
+    """{(token, pool, quote)} -> USD quote di pool (four.meme: dana di bonding curve)."""
+    wbnb = next((a for a, v in QUOTES[chain].items() if v[0] == "WBNB"), None)
+    items = list(items)
+    calls = [(FOURMEME_HELPER, "0x1f69565f" + pad(t)[2:]) if pool == "fourmeme"
+             else (q, "0x70a08231" + pad(pool)[2:]) for t, pool, q in items]  # balanceOf(pool)
+    out = {}
+    for (t, pool, q), r in zip(items, eth_calls(chain, calls)):
+        if not r or r == "0x":
+            continue
+        if pool == "fourmeme":
+            w = words(r)
+            q_usd = prices.get(wbnb) if int(q, 16) == 0 else prices.get(q)
+            if len(w) >= 12 and not w[11] and q_usd:
+                out[t] = w[9] / 1e18 * q_usd
+        elif q in QUOTES[chain] and prices.get(q):
+            out[t] = int(r[:66], 16) / 10 ** QUOTES[chain][q][1] * prices[q]
+    return out
+
+
+def is_smart(stats, min_tokens=2):
+    return stats[0] >= max(1, min_tokens) and stats[1] / stats[0] >= 0.5
+
+
+def top_tokens(chain, state, prices, now, n=5):
+    """Peringkat token dari data 24 jam: luas pembeli, arus bersih, pembeli ⭐, likuiditas, harga."""
+    by = defaultdict(lambda: {"usd": 0.0, "buyers": defaultdict(float), "pool": None, "q": None, "ts": 0})
+    for f in state.get("flows", {}).get(chain, []):
+        d = by[f[1]]
+        d["usd"] += f[3]
+        d["buyers"][f[2]] += f[3]
+        if len(f) >= 6 and f[0] >= d["ts"]:
+            d["pool"], d["q"], d["ts"] = f[4], f[5], f[0]
+    vol = defaultdict(lambda: [0.0, 0.0])
+    for _, token, v_in, v_out in state.get("volume", {}).get(chain, []):
+        vol[token][0] += v_in
+        vol[token][1] += v_out
+    cands = {t: d for t, d in by.items() if len(d["buyers"]) >= 3 and d["pool"]}
+    if not cands:
+        return []
+    liq = pool_liquidity(chain, [(t, d["pool"], d["q"]) for t, d in cands.items()], prices)
+    gains = defaultdict(list)
+    for k, p in state["positions"].items():
+        c, _, token = k.split(":")
+        if c == chain and token in cands and p.get("u"):
+            gains[token].append(p["last"] / p["p"] - 1)
+    recs = track_records(chain, state, now)
+    rows = []
+    for t, d in cands.items():
+        net, liquidity = vol[t][0] - vol[t][1], liq.get(t)
+        g = sorted(gains[t])
+        mom = g[len(g) // 2] if g else None
+        if (net < 0.1 * vol[t][0] or not liquidity or liquidity < MIN_LIQUIDITY
+                or (mom is not None and mom < -0.3)):
+            continue  # tidak net beli (>= 10% volume beli), likuiditas tipis, atau harga anjlok (indikasi rug)
+        smart = sum(1 for b in d["buyers"] if is_smart(record_stats(recs, b, t)))
+        score = (25 * min(len(d["buyers"]) / 20, 1) + 20 * min(net / 250_000, 1) + 20 * min(smart / 3, 1)
+                 + 20 * min(math.log10(liquidity / MIN_LIQUIDITY), 1)
+                 + (15 * min(max((mom + 0.2) / 0.7, 0), 1) if mom is not None else 7.5))
+        warn = []
+        top_share = max(d["buyers"].values()) / d["usd"]
+        if top_share > 0.5:
+            score -= 10
+            warn.append(f"1 wallet = {top_share:.0%} pembelian")
+        rows.append({"token": t, "score": score, "buy": vol[t][0], "sell": vol[t][1], "net": net,
+                     "buyers": list(d["buyers"]), "smart": smart, "liq": liquidity, "mom": mom, "warn": warn})
+    rows.sort(key=lambda r: -r["score"])
+    rows = rows[:n * 2]
+    # Banyak pembeli wallet baru = sering bundle / bot peluncuran
+    buyers = [b for r in rows for b in r["buyers"][:20]]
+    nonces = dict(zip(buyers, batch(chain, [("eth_getTransactionCount", [b, "latest"]) for b in buyers])))
+    for r in rows:
+        sample = [b for b in r["buyers"][:20] if nonces.get(b)]
+        fresh = sum(1 for b in sample if int(nonces[b], 16) <= 5) / len(sample) if sample else 0
+        if fresh > 0.5:
+            r["score"] -= 10
+            r["warn"].append(f"{fresh:.0%} pembeli wallet baru")
+    return [r for r in sorted(rows, key=lambda r: -r["score"]) if r["score"] >= MIN_SCORE][:n]
+
+
+def top_text(chain, rows, meta):
+    lines = [f"📊 <b>TOP {len(rows)} SINYAL AKUMULASI · {chain.upper()} · 24 jam</b>",
+             "<i>Skor dari data on-chain, bukan saran investasi. Cek kontrak &amp; chart sebelum beli.</i>"]
+    for i, r in enumerate(rows, 1):
+        sym = meta.get(r["token"], ["?", 18])[0]
+        mom = "" if r["mom"] is None else f" · harga {round(r['mom'] * 100):+d}% sejak dibeli"
+        smart = f" (⭐{r['smart']})" if r["smart"] else ""
+        lines += ["",
+                  f"{i}. <b>{link(sym, DEXSCREENER[chain] + r['token'])}</b> · skor {max(0, round(r['score']))}/100",
+                  f"Volume beli {fmt_usd(r['buy'])} / jual {fmt_usd(r['sell'])} (net +{fmt_usd(r['net'])})",
+                  f"{len(r['buyers'])} wallet pembeli{smart}",
+                  f"Likuiditas {fmt_usd(r['liq'])}{mom}"]
+        lines += [f"⚠️ {w}" for w in r["warn"]]
+        lines.append(html.escape(r["token"]))
+    return "\n".join(lines)
+
+
+def send_top(chain, state, prices, now, every_min):
+    last = state.setdefault("top_sent", {}).get(chain, 0)
+    if every_min <= 0 or now - last < every_min * 60:
+        return
+    rows = top_tokens(chain, state, prices, now)
+    state["top_sent"][chain] = now
+    if not rows:
+        log(f"{chain}: top 5: belum ada token yang lolos syarat")
+        return
+    meta = token_meta(chain, [r["token"] for r in rows], state["tokens"].setdefault(chain, {}))
+    msg = top_text(chain, rows, meta)
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {plain(msg)}\n", flush=True)
+    if not send_telegram(msg, preview=False, html=True) and os.environ.get("TELEGRAM_BOT_TOKEN"):
+        send_telegram(plain(msg), preview=False)
+
+
 # --- Main --------------------------------------------------------------------
 
 def run_chain(chain, args, state):
@@ -575,7 +713,7 @@ def run_chain(chain, args, state):
     prices = quote_prices(chain)
     # Pembelian di atas --track-usd dicatat untuk rekam jejak; alert hanya >= --min-usd
     track_usd = min(args.track_usd, args.min_usd)
-    buys = dex_buys(chain, start, head, track_usd, prices, state)
+    buys, volume = dex_buys(chain, start, head, track_usd, prices, state)
     if chain == "bsc":
         wbnb = next(a for a, v in QUOTES["bsc"].items() if v[0] == "WBNB")
         buys += fourmeme_buys(start, head, track_usd, prices.get(wbnb), state)
@@ -586,14 +724,15 @@ def run_chain(chain, args, state):
     recs = track_records(chain, state, now)
     for b in buys:
         b["record"] = record_stats(recs, b["buyer"], b["token"])
-    smart = lambda b: b["record"][0] >= max(1, args.smart_min) and b["record"][1] / b["record"][0] >= 0.5
     record_buys(chain, buys, meta, state, now)
     record_flows(chain, buys, state, now)
+    record_volume(chain, volume, state, now)
     # Satu alert per token: total semua pembelian token itu di run ini >= --min-usd
     alerts = [g for g in group_by_token(buys)
-              if g["usd"] >= args.min_usd and (not args.smart_only or any(smart(b) for b in g["buys"]))]
+              if g["usd"] >= args.min_usd and (not args.smart_only or any(is_smart(b["record"], args.smart_min) for b in g["buys"]))]
     minutes = max(1, round((head - start + 1) * BLOCK_TIME[chain] / 60))
     send_alerts(chain, alerts, meta, state, args.max_alerts, minutes)
+    send_top(chain, state, prices, now, args.top_every)
     state["last"][chain] = head
     log(f"{chain}: {len(alerts)} token di-alert, {len(buys)} beli tercatat; "
         f"{n_live:,} pembelian dipantau ({n_priced:,} pool berhasil dicek harganya)")
@@ -629,6 +768,8 @@ def main():
                    help="hanya alert pembeli yang rekam jejaknya bagus (>= setengah token naik >= 50%%)")
     p.add_argument("--smart-min", type=int, default=2,
                    help="jumlah token minimal di rekam jejak untuk --smart-only (default 2)")
+    p.add_argument("--top-every", type=float, default=60,
+                   help="kirim TOP 5 token tiap N menit (default 60; 0 = mati)")
     p.add_argument("--state", default=str(DEFAULT_STATE), help="file state (blok terakhir & cache pool)")
     args = p.parse_args()
     chains = [c.strip() for c in args.chains.split(",") if c.strip()]
