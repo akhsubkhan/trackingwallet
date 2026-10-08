@@ -193,6 +193,15 @@ Cara kerja:
    (`3x beli`). Label exchange dari `labels.json` dan tanda **wallet baru**
    (≤ 5 transaksi) ikut ditampilkan.
 
+### Hanya token besar (`--top-mcap`)
+
+Di GitHub Actions default-nya **hanya 50 token market cap terbesar** yang punya kontrak
+di BSC/ETH (variable `BIGBUY_TOP_MCAP`, `0` = semua token termasuk meme kecil). Daftar
+diambil dari CoinGecko sekali sehari; stablecoin, aset yang dipatok (emas, treasury) dan
+token mayor (WBNB/WETH/WBTC/…) tidak dihitung. Contoh isi: LINK, UNI, AAVE, PEPE, SHIB,
+ONDO, ENA, ARB, CAKE, LDO, PENDLE. Alert menampilkan peringkatnya, mis. `#48 mcap`.
+Jika CoinGecko gagal, daftar terakhir tetap dipakai; jika belum pernah ada, tidak ada alert.
+
 ### Rekam jejak pembeli
 
 Setiap pembelian ≥ `--track-usd` (default $2.000) dicatat
