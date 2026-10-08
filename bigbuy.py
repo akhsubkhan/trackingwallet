@@ -618,7 +618,7 @@ def group_text(chain, g, meta, labels, nonces, supply, minutes, day, names=None)
     amt = g["raw"] / 10 ** dec
     n_wallet = len(g["buys"])
     title = "AKUMULASI" if n_wallet > 1 else "BELI BESAR"
-    where = " four.meme" if g["fourmeme"] else ""
+    where = (" four.meme" if g["fourmeme"] else "") + (f" · #{g['rank']} mcap" if g.get("rank") else "")
     share = amt / supply * 100 if supply else None
     pct = ("" if share is None or share > 100 else  # > 100%: totalSupply token tidak wajar
            " (&lt;0.01% supply)" if share < 0.01 else f" ({share:.2f}% supply)")
@@ -681,11 +681,11 @@ def send_alerts(chain, groups, meta, state, max_alerts, minutes):
 DS_CHAIN = {"bsc": "bsc", "eth": "ethereum"}
 
 
-def get_json(url):
+def get_json(url, timeout=15):
     """GET JSON sumber publik (DexScreener / CoinGecko); None jika gagal."""
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (trackingwallet)", "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
@@ -856,6 +856,54 @@ def story_lines(chain, token, story, buyers, labels, names=None, smart=None):
     return lines
 
 
+# --- Universe: hanya N token market cap terbesar -------------------------------
+
+CG_MARKETS = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={}"
+CG_LIST = "https://api.coingecko.com/api/v3/coins/list?include_platform=true"
+UNIVERSE_TTL = 24 * 3600
+# Dipatok ke aset nyata (emas, obligasi/treasury): harga mengikuti asetnya, bukan sinyal on-chain
+PEGGED = {"PAXG", "XAUT", "KAU", "XAUM", "EUTBL", "USTB", "BUIDL", "JAAA", "BCAP", "OUSG", "USYC", "BENJI",
+          "TBILL", "STBT", "USDY", "OUSD", "M", "A7A5"}
+
+
+def big_tokens(state, n):
+    """{chain: {alamat: [simbol, rank]}} untuk n token market cap terbesar yang punya kontrak di BSC/ETH.
+    Stablecoin & aset stabil (rentang harga 24 jam < 0,5%, mis. RWA treasury) dan token mayor dilewati.
+    Disimpan 24 jam di state; jika CoinGecko gagal, daftar lama tetap dipakai (None jika belum pernah ada)."""
+    cache = state.get("universe")
+    if cache and cache.get("n") == n and time.time() - cache["ts"] < UNIVERSE_TTL:
+        return cache["tokens"]
+    markets = (get_json(CG_MARKETS.format(1), 60) or []) + (get_json(CG_MARKETS.format(2), 60) or [])
+    coins = get_json(CG_LIST, 60)
+    if not markets or not isinstance(coins, list):
+        log("daftar token besar gagal diambil dari CoinGecko" + ("; pakai daftar lama" if cache else ""))
+        return cache["tokens"] if cache else None
+    platforms = {c.get("id"): c.get("platforms") or {} for c in coins}
+    picked, count = {"bsc": {}, "eth": {}}, 0
+    for m in markets:
+        hi, lo = m.get("high_24h") or 0, m.get("low_24h") or 0
+        sym, price = str(m.get("symbol", "")).upper(), m.get("current_price") or 0
+        if (not lo or (hi - lo) / lo < 0.005 or 0.97 <= price <= 1.03 or "USD" in sym or "EUR" in sym
+                or sym in PEGGED):
+            continue  # stablecoin / aset dipatok (emas, treasury): bukan "token" untuk dibeli
+        found = {}
+        for chain, key in (("bsc", "binance-smart-chain"), ("eth", "ethereum")):
+            addr = (platforms.get(m.get("id")) or {}).get(key) or ""
+            addr = addr.lower()
+            if addr.startswith("0x") and len(addr) == 42 and addr not in MAJORS[chain]:
+                found[chain] = addr
+        if not found:
+            continue
+        for chain, addr in found.items():
+            picked[chain][addr] = [str(m.get("symbol", "?")).upper(), m.get("market_cap_rank")]
+        count += 1
+        if count >= n:
+            break
+    state["universe"] = {"ts": time.time(), "n": n, "tokens": picked}
+    log(f"daftar {count} token besar: BSC {len(picked['bsc'])}, ETH {len(picked['eth'])} kontrak")
+    return picked
+
+
 # --- Top 5 (ringkasan per jam) ------------------------------------------------
 
 MIN_LIQUIDITY = 20_000   # USD sisi quote; di bawah ini terlalu tipis untuk dibeli/dijual
@@ -886,7 +934,7 @@ def is_smart(stats, min_tokens=2):
     return stats[0] >= max(1, min_tokens) and stats[1] / stats[0] >= 0.5
 
 
-def top_tokens(chain, state, prices, now, n=5):
+def top_tokens(chain, state, prices, now, n=5, allowed=None):
     """Peringkat token dari data 24 jam: luas pembeli, arus bersih, pembeli ⭐, likuiditas, harga."""
     by = defaultdict(lambda: {"usd": 0.0, "buyers": defaultdict(float), "pool": None, "q": None, "ts": 0})
     for f in state.get("flows", {}).get(chain, []):
@@ -901,7 +949,8 @@ def top_tokens(chain, state, prices, now, n=5):
         vol[token][1] += v_out
     funded = state.get("funded", {}).get(chain, {})
     cands = {t: d for t, d in by.items()
-             if len(d["buyers"]) >= 3 and d["pool"] and not (funded.get(t) or [0] * 5)[4]}  # diputar: dicoret
+             if len(d["buyers"]) >= 3 and d["pool"] and not (funded.get(t) or [0] * 5)[4]  # diputar: dicoret
+             and (allowed is None or t in allowed)}
     if not cands:
         return []
     liq = pool_liquidity(chain, [(t, d["pool"], d["q"]) for t, d in cands.items()], prices)
@@ -973,11 +1022,11 @@ def top_text(chain, rows, meta, stories=None, labels=None, names=None):
     return "\n".join(lines)
 
 
-def send_top(chain, state, prices, now, every_min):
+def send_top(chain, state, prices, now, every_min, allowed=None):
     last = state.setdefault("top_sent", {}).get(chain, 0)
     if every_min <= 0 or now - last < every_min * 60:
         return
-    rows = top_tokens(chain, state, prices, now)
+    rows = top_tokens(chain, state, prices, now, allowed=allowed)
     state["top_sent"][chain] = now
     if not rows:
         log(f"{chain}: top 5: belum ada token yang lolos syarat")
@@ -1060,12 +1109,21 @@ def run_chain(chain, args, state):
         flag_wash(chain, groups, funders, prices, start, head, state, now)
     except Exception as exc:
         log(f"{chain}: cek pendana gagal: {exc}")
+    # --top-mcap N: hanya token di daftar N market cap terbesar (CoinGecko)
+    allowed = None
+    if args.top_mcap > 0:
+        universe = big_tokens(state, args.top_mcap)
+        allowed = (universe or {}).get(chain, {})
+        for g in groups:
+            if g["token"] in allowed:
+                g["rank"] = allowed[g["token"]][1]
+        groups = [g for g in groups if g["token"] in allowed]
     # Satu alert per token: total semua pembelian token itu di run ini >= --min-usd
     alerts = [g for g in groups
               if g["usd"] >= args.min_usd and (not args.smart_only or any(is_smart(b["record"], args.smart_min) for b in g["buys"]))]
     minutes = max(1, round((head - start + 1) * BLOCK_TIME[chain] / 60))
     send_alerts(chain, alerts, meta, state, args.max_alerts, minutes)
-    send_top(chain, state, prices, now, args.top_every)
+    send_top(chain, state, prices, now, args.top_every, allowed)
     state["last"][chain] = head
     log(f"{chain}: {len(alerts)} token di-alert, {len(buys)} beli tercatat; "
         f"{n_live:,} pembelian dipantau ({n_priced:,} pool berhasil dicek harganya)")
@@ -1103,6 +1161,8 @@ def main():
                    help="jumlah token minimal di rekam jejak untuk --smart-only (default 2)")
     p.add_argument("--top-every", type=float, default=60,
                    help="kirim TOP 5 token tiap N menit (default 60; 0 = mati)")
+    p.add_argument("--top-mcap", type=int, default=0,
+                   help="hanya alert & TOP 5 untuk N token market cap terbesar di BSC/ETH (CoinGecko); 0 = semua token")
     p.add_argument("--state", default=str(DEFAULT_STATE), help="file state (blok terakhir & cache pool)")
     p.add_argument("--info", metavar="TOKEN", help="kirim narasi & info satu token (chain pertama di --chains) lalu keluar")
     args = p.parse_args()

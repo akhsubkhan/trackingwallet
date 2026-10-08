@@ -52,7 +52,10 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         # BIGBUY_ARGS opsional, mis. "--smart-only" (hanya pembeli dengan rekam jejak bagus)
-        run: python3 bigbuy.py --once --min-usd "${{ vars.BIGBUY_MIN_USD || '10000' }}" ${{ vars.BIGBUY_ARGS }}
+        # BIGBUY_TOP_MCAP: hanya N token market cap terbesar (0 = semua token, termasuk meme kecil)
+        run: >-
+          python3 bigbuy.py --once --min-usd "${{ vars.BIGBUY_MIN_USD || '10000' }}"
+          --top-mcap "${{ vars.BIGBUY_TOP_MCAP || '50' }}" ${{ vars.BIGBUY_ARGS }}
 
       # Run manual dengan input token: kirim narasi & info token itu saja
       - name: Info token
