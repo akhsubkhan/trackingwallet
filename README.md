@@ -224,7 +224,7 @@ Skor dari data on-chain, bukan saran investasi. Cek kontrak & chart sebelum beli
 Volume beli $410.5K / jual $180.2K (net +$230.3K)
 96 wallet pembeli (⭐4)
 Likuiditas $350.0K · harga +35% sejak dibeli
-Narasi: The first Chinese moon landing meme on BNB Chain… [Meme]
+Narasi: tidak ada deskripsi publik
 Website · X · Telegram · Mcap $1.25M · pool umur 2 hari
 Dibeli oleh: KOL @budi, Binance Hot Wallet 10
 ⚠️ 62% pembeli wallet baru
@@ -251,11 +251,11 @@ likuiditas < $20K, atau harga median turun > 30% dari harga beli (indikasi rug).
 
 Setiap token di TOP 5 dilengkapi:
 
-- **Narasi**: deskripsi dari pembuatnya di four.meme (token BSC four.meme), atau dari
-  CoinGecko (token yang sudah listing), plus kategori. `tidak ada deskripsi publik` =
-  sumber bisa diakses tapi token tidak punya deskripsi.
-- **Link** website / X / Telegram / Discord (DexScreener, four.meme, CoinGecko), market
-  cap dan umur pool. `⚠️ Tanpa website/sosial media` = tidak ada satu pun link publik.
+- **Narasi**: deskripsi & kategori dari CoinGecko (hanya token yang sudah listing di
+  sana; token meme baru umumnya belum). `tidak ada deskripsi publik` = sumber bisa
+  diakses tapi token tidak punya deskripsi. (API four.meme privat, tidak bisa dipakai.)
+- **Link** website / X / Telegram / Discord (DexScreener, CoinGecko), market cap dan
+  umur pool. `⚠️ Tanpa website/sosial media` = tidak ada satu pun link publik.
 - **Dibeli oleh**: pembeli yang alamatnya ada di `labels.json` atau `wallets.json`.
   Tambahkan sendiri wallet KOL / fund / smart money yang Anda tahu, mis.:
 
