@@ -211,6 +211,39 @@ Catatan:
 - Harga dicek tiap run (15 menit), jadi lonjakan singkat di antaranya bisa terlewat.
 - Token four.meme yang sudah pindah ke PancakeSwap berhenti diperbarui harganya.
 
+### TOP 5 sinyal akumulasi (tiap jam)
+
+Sekali per jam (`--top-every`, menit; `0` = mati) dikirim peringkat 5 token per chain
+dari data **24 jam** terakhir:
+
+```
+📊 TOP 5 SINYAL AKUMULASI · BSC · 24 jam
+Skor dari data on-chain, bukan saran investasi. Cek kontrak & chart sebelum beli.
+
+1. 登月 · skor 78/100
+Volume beli $410.5K / jual $180.2K (net +$230.3K)
+96 wallet pembeli (⭐4)
+Likuiditas $350.0K · harga +35% sejak dibeli
+⚠️ 62% pembeli wallet baru
+0xa91d549aeb83dc058c12157449be2a677ee60a4a
+```
+
+| Komponen skor | Poin |
+|---|---|
+| Wallet pembeli berbeda (≥ `--track-usd`) | s/d 25 (20 wallet = penuh) |
+| Arus bersih: volume quote masuk pool − keluar pool | s/d 20 ($250K = penuh) |
+| Pembeli dengan rekam jejak ⭐ | s/d 20 (3 wallet = penuh) |
+| Likuiditas pool (sisi quote; four.meme: dana di curve) | s/d 20 ($20K = 0, $200K = penuh) |
+| Harga sekarang vs harga beli (median pembeli) | s/d 15 (−20% = 0, +50% = penuh) |
+| ⚠️ 1 wallet > 50% pembelian / > 50% pembeli wallet baru (bundle/bot) | −10 masing-masing |
+
+Token **dicoret** jika: skor < 30, < 3 wallet pembeli, tidak net beli (beli harus ≥ 1,1× jual),
+likuiditas < $20K, atau harga median turun > 30% dari harga beli (indikasi rug).
+
+> ⚠️ Ini peringkat sinyal, **bukan rekomendasi beli**. Tool ini tidak memeriksa kontrak
+> (honeypot, pajak jual, mint, owner), tim, atau berita; volume bisa dipalsukan bot.
+> Selalu cek sendiri (mis. DexScreener, honeypot checker, explorer) sebelum membeli.
+
 Di GitHub Actions, `bigbuy.py --once` ikut jalan di workflow `watch.yml` tiap 15 menit
 dan memindai semua blok sejak run sebelumnya. Ubah ambang lewat variable
 `BIGBUY_MIN_USD` (default `10000`).
