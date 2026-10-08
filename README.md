@@ -65,19 +65,22 @@ Alert akan dikirim ke Telegram sekaligus tampil di terminal.
 
 ## Jalan otomatis di GitHub Actions (tanpa laptop menyala)
 
-Workflow `.github/workflows/watch.yml` menjalankan `watch --once` tiap 15 menit
-di server GitHub dan mengirim alert ke Telegram.
+Workflow `.github/workflows/watch.yml` menjalankan `bigbuy.py --once` (alert beli token,
+TOP 5) tiap 15 menit di server GitHub dan mengirim alert ke Telegram. Alert saldo whale
+`tracker.py` **tidak** dijadwalkan (pergerakan hot wallet exchange terlalu ramai & lemah
+sinyalnya); jalankan manual bila perlu: `python3 tracker.py watch`.
 
 1. Buka repo → **Settings → Secrets and variables → Actions → New repository secret**,
    tambahkan `TELEGRAM_BOT_TOKEN` dan `TELEGRAM_CHAT_ID`.
-2. (Opsional) Di tab **Variables**, buat `MIN_USD` untuk mengubah batas alert
-   (default `1000000`).
-3. Buka tab **Actions → Whale watch → Run workflow** untuk tes pertama. Run pertama
-   hanya mencatat saldo awal; alert muncul mulai run berikutnya.
+2. (Opsional) Di tab **Variables**, buat `BIGBUY_MIN_USD` (default `10000`) dan
+   `BIGBUY_ARGS` (mis. `--smart-only`).
+3. Buka tab **Actions → Whale watch → Run workflow** untuk tes pertama.
 
 Catatan:
-- Jadwal GitHub bisa telat 5–30 menit saat sibuk, kadang satu jadwal terlewat.
-- Saldo terakhir disimpan di cache Actions (bukan di-commit ke repo).
+- Jadwal GitHub bisa telat berjam-jam / terlewat. Agar tepat tiap 15 menit, picu workflow
+  dari luar (mis. cron-job.org: `POST https://api.github.com/repos/<owner>/<repo>/actions/workflows/watch.yml/dispatches`,
+  header `Authorization: Bearer <fine-grained token, izin Actions read/write>`, body `{"ref":"main"}`).
+- State disimpan di cache Actions (bukan di-commit ke repo).
 - Repo privat punya kuota 2.000 menit/bulan; tiap 15 menit ≈ 2.900 run/bulan, jadi
   bisa melebihi kuota. Ubah `cron` di workflow (mis. `7,37 * * * *` = tiap 30 menit)
   atau jadikan repo publik.
