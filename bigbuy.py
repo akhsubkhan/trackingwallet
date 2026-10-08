@@ -32,6 +32,7 @@ from pathlib import Path
 from bandar import (CG_PLATFORM, EXPLORER, EXPLORER_TX, FM_BUY, FOURMEME_HELPER, FOURMEME_MANAGER, FOURMEME_V1,
                     QUOTES, RPC, SWAP_PCS_V3, SWAP_V2, SWAP_V3, TRANSFER, batch, decode_str, eth_calls,
                     load_labels, pad, token_usd, topic_addr, word_addr, words)
+from keccak import keccak256
 from tracker import http_json, send_telegram
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -517,7 +518,8 @@ def flow_24h(chain, state, token):
     return sum(f[3] for f in rows), len({f[2] for f in rows})
 
 
-def group_text(chain, g, meta, labels, nonces, supply, minutes, day):
+def group_text(chain, g, meta, labels, nonces, supply, minutes, day, names=None):
+    names = names or {}
     sym, dec = meta.get(g["token"], ["?", 18])
     amt = g["raw"] / 10 ** dec
     n_wallet = len(g["buys"])
@@ -535,7 +537,7 @@ def group_text(chain, g, meta, labels, nonces, supply, minutes, day):
         lines.append(f"24 jam: {fmt_usd(day_usd)} dari {day_wallets} wallet")
     for b in g["buys"][:TOP_BUYERS]:
         nonce = nonces.get(b["buyer"])
-        who = labels.get(b["buyer"])
+        who = labels.get(b["buyer"]) or names.get(b["buyer"])
         extra = ("" if b["n"] == 1 else f" {b['n']}x") + record_badge(b["record"])
         extra += " 🆕" if nonce is not None and nonce <= 5 else ""
         extra += f" ({html.escape(who)})" if who else ""
@@ -553,6 +555,7 @@ def send_alerts(chain, groups, meta, state, max_alerts, minutes):
         return
     labels = load_labels()
     shown = groups[:max_alerts]
+    names = wallet_names(chain, [b["buyer"] for g in shown for b in g["buys"][:TOP_BUYERS]], state)
     buyers = list(dict.fromkeys(b["buyer"] for g in shown for b in g["buys"][:TOP_BUYERS]))
     nonces = {a: int(n, 16) for a, n in zip(buyers, batch(chain, [("eth_getTransactionCount", [a, "latest"])
                                                                   for a in buyers])) if n}
@@ -561,7 +564,8 @@ def send_alerts(chain, groups, meta, state, max_alerts, minutes):
     for g, sup in zip(shown, supplies):
         dec = meta.get(g["token"], ["?", 18])[1]
         supply = int(sup, 16) / 10 ** dec if sup and sup != "0x" else 0
-        msgs.append(group_text(chain, g, meta, labels, nonces, supply, minutes, flow_24h(chain, state, g["token"])))
+        msgs.append(group_text(chain, g, meta, labels, nonces, supply, minutes, flow_24h(chain, state, g["token"]),
+                               names))
     if len(groups) > max_alerts:
         msgs.append(f"… +{len(groups) - max_alerts} token lain di {chain.upper()} (naikkan --min-usd)")
     for m in msgs:
@@ -640,12 +644,95 @@ def token_story(chain, token):
     return out
 
 
-def known_buyers(buyers, labels):
-    """Pembeli yang dikenal dari labels.json / wallets.json (KOL, fund, exchange, dll.)."""
-    return list(dict.fromkeys(labels[b] for b in buyers if b in labels))
+# Nama wallet on-chain yang dipasang pemiliknya sendiri: ENS (.eth) dan Space ID (.bnb)
+ENS_REVERSE_RECORDS = "0x3671ae578e63fdf66ad4f3e12cc0c0d71ac7510c"  # getNames(address[]), sudah cek dua arah
+SID_REGISTRY = "0x08ced32a7f3eec915ba84415e9c07a7286977956"         # Space ID registry (BSC)
+NAME_TTL = 7 * 86400
 
 
-def story_lines(chain, token, story, buyers, labels):
+def namehash(name):
+    node = b"\0" * 32
+    for label in reversed(name.split(".")):
+        node = keccak256(node + keccak256(label.encode()))
+    return node
+
+
+def abi_strings(raw):
+    """Decode string[] hasil eth_call."""
+    data = bytes.fromhex(raw[2:])
+    u = lambda o: int.from_bytes(data[o:o + 32], "big")
+    base = u(0)
+    arr = base + 32
+    out = []
+    for i in range(u(base)):
+        off = arr + u(arr + 32 * i)
+        out.append(data[off + 32:off + 32 + u(off)].decode(errors="replace"))
+    return out
+
+
+def _ens_names(addrs):
+    out = {}
+    for i in range(0, len(addrs), 50):
+        chunk = addrs[i:i + 50]
+        data = ("0xcbf8b66c" + hex(32)[2:].rjust(64, "0") + hex(len(chunk))[2:].rjust(64, "0")
+                + "".join(a[2:].rjust(64, "0") for a in chunk))
+        (raw,) = eth_calls("eth", [(ENS_REVERSE_RECORDS, data)])
+        if raw and len(raw) > 2:
+            out.update(zip(chunk, abi_strings(raw)))
+    return out
+
+
+def _sid_names(addrs):
+    """Reverse record .bnb, lalu dicek balik: nama harus menunjuk ke alamat yang sama."""
+    nodes = [namehash(a[2:] + ".addr.reverse") for a in addrs]
+    resolvers = eth_calls("bsc", [(SID_REGISTRY, "0x0178b8bf" + n.hex()) for n in nodes])
+    hits = [(a, n, topic_addr(r)) for a, n, r in zip(addrs, nodes, resolvers) if r and len(r) == 66 and int(r, 16)]
+    names = eth_calls("bsc", [(rv, "0x691f3431" + n.hex()) for _, n, rv in hits])  # name(bytes32)
+    cands = [(a, decode_str(nm)) for (a, _, _), nm in zip(hits, names) if nm and len(nm) > 2]
+    cands = [(a, nm) for a, nm in cands if nm.endswith(".bnb")]
+    fwd_nodes = [namehash(nm) for _, nm in cands]
+    fwd_res = eth_calls("bsc", [(SID_REGISTRY, "0x0178b8bf" + n.hex()) for n in fwd_nodes])
+    pairs = [(c, n, topic_addr(r)) for c, n, r in zip(cands, fwd_nodes, fwd_res) if r and len(r) == 66 and int(r, 16)]
+    addrs_back = eth_calls("bsc", [(rv, "0x3b3b57de" + n.hex()) for _, n, rv in pairs])  # addr(bytes32)
+    return {a: nm for ((a, nm), _, _), back in zip(pairs, addrs_back)
+            if back and len(back) == 66 and topic_addr(back) == a}
+
+
+def wallet_names(chain, addrs, state):
+    """alamat -> nama .eth / .bnb terverifikasi (cache 7 hari di state)."""
+    cache = state.setdefault("names", {}).setdefault(chain, {})
+    now = time.time()
+    todo = [a for a in dict.fromkeys(addrs) if a not in cache or now - cache[a][1] > NAME_TTL]
+    if todo:
+        try:
+            found = _ens_names(todo) if chain == "eth" else _sid_names(todo)
+        except Exception as exc:
+            log(f"{chain}: gagal cek nama wallet: {exc}")
+            found = None
+        if found is not None:
+            for a in todo:
+                cache[a] = [found.get(a, ""), now]
+    if len(cache) > 50_000:
+        for a in sorted(cache, key=lambda a: cache[a][1])[:len(cache) - 50_000]:
+            del cache[a]
+    return {a: cache[a][0] for a in addrs if cache.get(a, ["", 0])[0]}
+
+
+def known_buyers(buyers, labels, names=None, smart=None):
+    """Pembeli yang dikenal: label (labels.json / wallets.json), nama .eth/.bnb, smart money otomatis."""
+    names, smart = names or {}, smart or {}
+    out = []
+    for b in buyers:
+        if b in labels:
+            out.append(labels[b])
+        elif b in names:
+            out.append(names[b])
+        elif b in smart:
+            out.append(f"smart money {short(b)} ⭐{smart[b]}")
+    return list(dict.fromkeys(out))
+
+
+def story_lines(chain, token, story, buyers, labels, names=None, smart=None):
     lines = []
     narrative = story["desc"] or ""
     cats = ", ".join(story["cats"][:3])
@@ -667,7 +754,7 @@ def story_lines(chain, token, story, buyers, labels):
         lines.append(" · ".join(x for x in (links, " · ".join(facts)) if x))
     elif story.get("reached"):
         lines.append("⚠️ Tanpa website/sosial media")
-    known = known_buyers(buyers, labels)
+    known = known_buyers(buyers, labels, names, smart)
     if known:
         lines.append("Dibeli oleh: " + html.escape(", ".join(known[:5]))
                      + (f" +{len(known) - 5} lainnya" if len(known) > 5 else ""))
@@ -735,8 +822,12 @@ def top_tokens(chain, state, prices, now, n=5):
         if (net < 0.1 * vol[t][0] or not liquidity or liquidity < MIN_LIQUIDITY
                 or (mom is not None and mom < -0.3)):
             continue  # tidak net beli (>= 10% volume beli), likuiditas tipis, atau harga anjlok (indikasi rug)
-        smart = sum(1 for b in d["buyers"] if is_smart(record_stats(recs, b, t)))
-        score = (25 * min(len(d["buyers"]) / 20, 1) + 20 * min(net / 250_000, 1) + 20 * min(smart / 3, 1)
+        smart = {}
+        for b in d["buyers"]:
+            st = record_stats(recs, b, t)
+            if is_smart(st):
+                smart[b] = f"{st[1]}/{st[0]}"
+        score = (25 * min(len(d["buyers"]) / 20, 1) + 20 * min(net / 250_000, 1) + 20 * min(len(smart) / 3, 1)
                  + 20 * min(math.log10(liquidity / MIN_LIQUIDITY), 1)
                  + (15 * min(max((mom + 0.2) / 0.7, 0), 1) if mom is not None else 7.5))
         warn = []
@@ -745,7 +836,8 @@ def top_tokens(chain, state, prices, now, n=5):
             score -= 10
             warn.append(f"1 wallet = {top_share:.0%} pembelian")
         rows.append({"token": t, "score": score, "buy": vol[t][0], "sell": vol[t][1], "net": net,
-                     "buyers": list(d["buyers"]), "smart": smart, "liq": liquidity, "mom": mom, "warn": warn})
+                     "buyers": sorted(d["buyers"], key=lambda b: -d["buyers"][b]), "smart": smart, "liq": liquidity,
+                     "mom": mom, "warn": warn})
     rows.sort(key=lambda r: -r["score"])
     rows = rows[:n * 2]
     # Banyak pembeli wallet baru = sering bundle / bot peluncuran
@@ -760,21 +852,21 @@ def top_tokens(chain, state, prices, now, n=5):
     return [r for r in sorted(rows, key=lambda r: -r["score"]) if r["score"] >= MIN_SCORE][:n]
 
 
-def top_text(chain, rows, meta, stories=None, labels=None):
+def top_text(chain, rows, meta, stories=None, labels=None, names=None):
     stories, labels = stories or {}, labels or {}
     lines = [f"📊 <b>TOP {len(rows)} SINYAL AKUMULASI · {chain.upper()} · 24 jam</b>",
              "<i>Skor dari data on-chain, bukan saran investasi. Cek kontrak &amp; chart sebelum beli.</i>"]
     for i, r in enumerate(rows, 1):
         sym = meta.get(r["token"], ["?", 18])[0]
         mom = "" if r["mom"] is None else f" · harga {round(r['mom'] * 100):+d}% sejak dibeli"
-        smart = f" (⭐{r['smart']})" if r["smart"] else ""
+        smart = f" (⭐{len(r['smart'])})" if r["smart"] else ""
         lines += ["",
                   f"{i}. <b>{link(sym, DEXSCREENER[chain] + r['token'])}</b> · skor {max(0, round(r['score']))}/100",
                   f"Volume beli {fmt_usd(r['buy'])} / jual {fmt_usd(r['sell'])} (net +{fmt_usd(r['net'])})",
                   f"{len(r['buyers'])} wallet pembeli{smart}",
                   f"Likuiditas {fmt_usd(r['liq'])}{mom}"]
         if r["token"] in stories:
-            lines += story_lines(chain, r["token"], stories[r["token"]], r["buyers"], labels)
+            lines += story_lines(chain, r["token"], stories[r["token"]], r["buyers"], labels, names, r["smart"])
         lines += [f"⚠️ {w}" for w in r["warn"]]
         lines.append(html.escape(r["token"]))
     return "\n".join(lines)
@@ -791,7 +883,8 @@ def send_top(chain, state, prices, now, every_min):
         return
     meta = token_meta(chain, [r["token"] for r in rows], state["tokens"].setdefault(chain, {}))
     stories = {r["token"]: token_story(chain, r["token"]) for r in rows}
-    msg = top_text(chain, rows, meta, stories, load_labels())
+    names = wallet_names(chain, [b for r in rows for b in r["buyers"][:100]], state)
+    msg = top_text(chain, rows, meta, stories, load_labels(), names)
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {plain(msg)}\n", flush=True)
     if not send_telegram(msg, preview=False, html=True) and os.environ.get("TELEGRAM_BOT_TOKEN"):
         send_telegram(plain(msg), preview=False)
@@ -811,7 +904,10 @@ def cmd_info(chain, token, state):
             vol[0] += v_in
             vol[1] += v_out
     lines = [f"🔎 <b>INFO {link(meta[token][0], DEXSCREENER[chain] + token)}</b> · {chain.upper()}"]
-    lines += story_lines(chain, token, token_story(chain, token), buyers, load_labels())
+    recs = track_records(chain, state, time.time())
+    smart = {b: f"{st[1]}/{st[0]}" for b in buyers for st in [record_stats(recs, b, token)] if is_smart(st)}
+    names = wallet_names(chain, buyers[:200], state)
+    lines += story_lines(chain, token, token_story(chain, token), buyers, load_labels(), names, smart)
     if flows:
         lines.append(f"24 jam (tercatat tool ini): beli {fmt_usd(sum(f[3] for f in flows))} dari "
                      f"{len(buyers)} wallet · volume beli {fmt_usd(vol[0])} / jual {fmt_usd(vol[1])}")

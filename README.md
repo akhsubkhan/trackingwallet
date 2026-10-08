@@ -226,7 +226,7 @@ Volume beli $410.5K / jual $180.2K (net +$230.3K)
 Likuiditas $350.0K · harga +35% sejak dibeli
 Narasi: tidak ada deskripsi publik
 Website · X · Telegram · Mcap $1.25M · pool umur 2 hari
-Dibeli oleh: KOL @budi, Binance Hot Wallet 10
+Dibeli oleh: KOL @budi, moonboy.bnb, smart money 0x6fa4…6220 ⭐3/4
 ⚠️ 62% pembeli wallet baru
 0xa91d549aeb83dc058c12157449be2a677ee60a4a
 ```
@@ -256,8 +256,14 @@ Setiap token di TOP 5 dilengkapi:
   diakses tapi token tidak punya deskripsi. (API four.meme privat, tidak bisa dipakai.)
 - **Link** website / X / Telegram / Discord (DexScreener, CoinGecko), market cap dan
   umur pool. `⚠️ Tanpa website/sosial media` = tidak ada satu pun link publik.
-- **Dibeli oleh**: pembeli yang alamatnya ada di `labels.json` atau `wallets.json`.
-  Tambahkan sendiri wallet KOL / fund / smart money yang Anda tahu, mis.:
+- **Dibeli oleh**: pembeli yang dikenal, otomatis dari tiga sumber:
+  1. **Nama on-chain** `.eth` (ENS) / `.bnb` (Space ID) yang dipasang pemilik wallet
+     sendiri, hanya jika cocok dua arah (alamat → nama → alamat yang sama). Banyak KOL &
+     trader memakainya. Nama ini juga tampil di daftar pembeli alert, mis. `(grumpyx.eth)`.
+  2. **Smart money otomatis**: pembeli dengan rekam jejak ⭐ (≥ 2 token, ≥ setengahnya naik
+     ≥ 50%), mis. `smart money 0x6fa4…6220 ⭐3/4`.
+  3. **Label manual** di `labels.json` / `wallets.json`. Tambahkan sendiri wallet KOL /
+     fund yang Anda tahu (sumber: GMGN, Arkham, DeBank, Dune, bio X), mis.:
 
   ```json
   "labels": {
