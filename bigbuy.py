@@ -525,7 +525,7 @@ def group_text(chain, g, meta, labels, nonces, supply, minutes, day):
     where = " four.meme" if g["fourmeme"] else ""
     share = amt / supply * 100 if supply else None
     pct = ("" if share is None or share > 100 else  # > 100%: totalSupply token tidak wajar
-           " (<0.01% supply)" if share < 0.01 else f" ({share:.2f}% supply)")
+           " (&lt;0.01% supply)" if share < 0.01 else f" ({share:.2f}% supply)")
     lines = [f"🟢 <b>{title} {link(sym, DEXSCREENER[chain] + g['token'])}</b> · {chain.upper()}{where} · "
              f"<b>{fmt_usd(g['usd'])}</b>",
              f"{n_wallet} wallet · {g['n_tx']}x beli · ±{minutes} menit terakhir",
@@ -580,11 +580,10 @@ def send_alerts(chain, groups, meta, state, max_alerts, minutes):
 # --- Narasi & pembeli yang dikenal --------------------------------------------
 
 DS_CHAIN = {"bsc": "bsc", "eth": "ethereum"}
-FOURMEME_API = "https://four.meme/meme-api/v1/private/token/get/v2?address={}"
 
 
 def get_json(url):
-    """GET JSON sumber publik (DexScreener / four.meme / CoinGecko); None jika gagal."""
+    """GET JSON sumber publik (DexScreener / CoinGecko); None jika gagal."""
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (trackingwallet)", "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -605,7 +604,8 @@ def clean_text(text, limit=200):
 
 
 def token_story(chain, token):
-    """Narasi & link token dari sumber publik: four.meme (BSC), CoinGecko, DexScreener."""
+    """Narasi & link token dari sumber publik: CoinGecko (deskripsi, kategori) dan DexScreener (link).
+    API four.meme tidak dipakai: privat (403 dari GitHub Actions)."""
     out = {"desc": "", "cats": [], "links": {}, "mcap": None, "age_days": None, "reached": 0}
 
     def add_link(name, url):
@@ -626,17 +626,6 @@ def token_story(chain, token):
         out["mcap"] = best.get("marketCap") or best.get("fdv")
         if best.get("pairCreatedAt"):
             out["age_days"] = (time.time() - best["pairCreatedAt"] / 1000) / 86400
-    if chain == "bsc":
-        fm = get_json(FOURMEME_API.format(token))
-        out["reached"] += fm is not None
-        data = fm.get("data") if isinstance(fm, dict) else None
-        if isinstance(data, dict):
-            out["desc"] = clean_text(data.get("descr") or data.get("description"))
-            if data.get("label"):
-                out["cats"].append(str(data["label"]))
-            add_link("Website", data.get("webUrl"))
-            add_link("X", data.get("twitterUrl"))
-            add_link("Telegram", data.get("telegramUrl"))
     cg = get_json(f"https://api.coingecko.com/api/v3/coins/{CG_PLATFORM[chain]}/contract/{token}")
     out["reached"] += cg is not None
     if isinstance(cg, dict) and cg.get("id"):
@@ -666,7 +655,7 @@ def story_lines(chain, token, story, buyers, labels):
     elif story.get("reached"):
         lines.append("Narasi: tidak ada deskripsi publik")
     else:
-        lines.append("Narasi: sumber data (DexScreener/four.meme/CoinGecko) tidak bisa diakses")
+        lines.append("Narasi: sumber data (DexScreener/CoinGecko) tidak bisa diakses")
     facts = []
     if story["mcap"]:
         facts.append(f"Mcap {fmt_usd(story['mcap'])}")
