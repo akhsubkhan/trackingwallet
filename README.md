@@ -224,6 +224,9 @@ Skor dari data on-chain, bukan saran investasi. Cek kontrak & chart sebelum beli
 Volume beli $410.5K / jual $180.2K (net +$230.3K)
 96 wallet pembeli (⭐4)
 Likuiditas $350.0K · harga +35% sejak dibeli
+Narasi: The first Chinese moon landing meme on BNB Chain… [Meme]
+Website · X · Telegram · Mcap $1.25M · pool umur 2 hari
+Dibeli oleh: KOL @budi, Binance Hot Wallet 10
 ⚠️ 62% pembeli wallet baru
 0xa91d549aeb83dc058c12157449be2a677ee60a4a
 ```
@@ -243,6 +246,32 @@ likuiditas < $20K, atau harga median turun > 30% dari harga beli (indikasi rug).
 > ⚠️ Ini peringkat sinyal, **bukan rekomendasi beli**. Tool ini tidak memeriksa kontrak
 > (honeypot, pajak jual, mint, owner), tim, atau berita; volume bisa dipalsukan bot.
 > Selalu cek sendiri (mis. DexScreener, honeypot checker, explorer) sebelum membeli.
+
+### Narasi & pembeli yang dikenal
+
+Setiap token di TOP 5 dilengkapi:
+
+- **Narasi**: deskripsi dari pembuatnya di four.meme (token BSC four.meme), atau dari
+  CoinGecko (token yang sudah listing), plus kategori. `tidak ada deskripsi publik` =
+  sumber bisa diakses tapi token tidak punya deskripsi.
+- **Link** website / X / Telegram / Discord (DexScreener, four.meme, CoinGecko), market
+  cap dan umur pool. `⚠️ Tanpa website/sosial media` = tidak ada satu pun link publik.
+- **Dibeli oleh**: pembeli yang alamatnya ada di `labels.json` atau `wallets.json`.
+  Tambahkan sendiri wallet KOL / fund / smart money yang Anda tahu, mis.:
+
+  ```json
+  "labels": {
+    "0x1234...abcd": "KOL @namaakun",
+    ...
+  }
+  ```
+
+  Ini "endorsement" on-chain: siapa yang benar-benar membeli, bukan siapa yang
+  ngetwit. Pantauan promosi di X/Twitter tidak termasuk (butuh API berbayar).
+
+**Cek satu token kapan saja**: tab **Actions → Whale watch → Run workflow**, isi
+`token` (alamat kontrak) dan pilih `chain`. Narasi, link, aktivitas 24 jam dan pembeli
+yang dikenal dikirim ke Telegram. Atau lokal: `python3 bigbuy.py --chains bsc --info 0x...`.
 
 Di GitHub Actions, `bigbuy.py --once` ikut jalan di workflow `watch.yml` tiap 15 menit
 dan memindai semua blok sejak run sebelumnya. Ubah ambang lewat variable
