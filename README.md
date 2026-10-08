@@ -72,7 +72,7 @@ sinyalnya); jalankan manual bila perlu: `python3 tracker.py watch`.
 
 1. Buka repo → **Settings → Secrets and variables → Actions → New repository secret**,
    tambahkan `TELEGRAM_BOT_TOKEN` dan `TELEGRAM_CHAT_ID`.
-2. (Opsional) Di tab **Variables**, buat `BIGBUY_MIN_USD` (default `10000`) dan
+2. (Opsional) Di tab **Variables**, buat `BIGBUY_MIN_USD` (default `50000`) dan
    `BIGBUY_ARGS` (mis. `--smart-only`).
 3. Buka tab **Actions → Whale watch → Run workflow** untuk tes pertama.
 
@@ -314,7 +314,7 @@ yang dikenal dikirim ke Telegram. Atau lokal: `python3 bigbuy.py --chains bsc --
 
 Di GitHub Actions, `bigbuy.py --once` ikut jalan di workflow `watch.yml` tiap 15 menit
 dan memindai semua blok sejak run sebelumnya. Ubah ambang lewat variable
-`BIGBUY_MIN_USD` (default `10000`).
+`BIGBUY_MIN_USD` (default `50000`).
 
 Batasan:
 - Hanya BSC dan Ethereum. Solana dan Tron tidak bisa dipindai seperti ini dengan API
