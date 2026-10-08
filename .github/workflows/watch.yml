@@ -5,6 +5,16 @@ on:
     # Tiap 15 menit, sengaja tidak di menit :00 (jam sibuk GitHub, delay lebih besar)
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
+    inputs:
+      token:
+        description: "Opsional: alamat token untuk dikirimi narasi & info ke Telegram"
+        required: false
+        default: ""
+      chain:
+        description: "Chain token tersebut"
+        type: choice
+        options: [bsc, eth]
+        default: bsc
 
 concurrency:
   group: whale-watch
@@ -48,6 +58,16 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         # BIGBUY_ARGS opsional, mis. "--smart-only" (hanya pembeli dengan rekam jejak bagus)
         run: python3 bigbuy.py --once --min-usd "${{ vars.BIGBUY_MIN_USD || '10000' }}" ${{ vars.BIGBUY_ARGS }}
+
+      # Run manual dengan input token: kirim narasi & info token itu saja
+      - name: Info token
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.token != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TOKEN: ${{ inputs.token }}
+          CHAIN: ${{ inputs.chain }}
+        run: python3 bigbuy.py --chains "$CHAIN" --info "$TOKEN"
 
       - name: Save state
         if: always() && hashFiles('state.json', 'bigbuy_state.json') != ''

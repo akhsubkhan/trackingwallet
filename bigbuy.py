@@ -24,10 +24,12 @@ import os
 import re
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
-from bandar import (EXPLORER, EXPLORER_TX, FM_BUY, FOURMEME_HELPER, FOURMEME_MANAGER, FOURMEME_V1,
+from bandar import (CG_PLATFORM, EXPLORER, EXPLORER_TX, FM_BUY, FOURMEME_HELPER, FOURMEME_MANAGER, FOURMEME_V1,
                     QUOTES, RPC, SWAP_PCS_V3, SWAP_V2, SWAP_V3, TRANSFER, batch, decode_str, eth_calls,
                     load_labels, pad, token_usd, topic_addr, word_addr, words)
 from tracker import http_json, send_telegram
@@ -575,6 +577,114 @@ def send_alerts(chain, groups, meta, state, max_alerts, minutes):
             send_telegram(plain(c), preview=False)  # HTML ditolak: kirim ulang sebagai teks biasa
 
 
+# --- Narasi & pembeli yang dikenal --------------------------------------------
+
+DS_CHAIN = {"bsc": "bsc", "eth": "ethereum"}
+FOURMEME_API = "https://four.meme/meme-api/v1/private/token/get/v2?address={}"
+
+
+def get_json(url):
+    """GET JSON sumber publik (DexScreener / four.meme / CoinGecko); None jika gagal."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (trackingwallet)", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return {}  # sumber terjangkau, token tidak terdaftar di sana
+        log(f"gagal ambil {url.split('?')[0]}: {exc}")
+        return None
+    except Exception as exc:
+        log(f"gagal ambil {url.split('?')[0]}: {exc}")
+        return None
+
+
+def clean_text(text, limit=200):
+    text = " ".join(html.unescape(re.sub("<[^>]+>", " ", text or "")).split())
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def token_story(chain, token):
+    """Narasi & link token dari sumber publik: four.meme (BSC), CoinGecko, DexScreener."""
+    out = {"desc": "", "cats": [], "links": {}, "mcap": None, "age_days": None, "reached": 0}
+
+    def add_link(name, url):
+        if url and isinstance(url, str) and url.startswith("http") and name not in out["links"]:
+            out["links"][name] = url
+
+    ds = get_json(f"https://api.dexscreener.com/tokens/v1/{DS_CHAIN[chain]}/{token}")
+    out["reached"] += ds is not None
+    if isinstance(ds, list) and ds:
+        best = max(ds, key=lambda x: ((x.get("liquidity") or {}).get("usd") or 0))
+        info = best.get("info") or {}
+        for w in info.get("websites") or []:
+            add_link("Website" if (w.get("label") or "website").lower() == "website" else w["label"], w.get("url"))
+        for so in info.get("socials") or []:
+            kind = (so.get("type") or "").lower()
+            add_link({"twitter": "X", "telegram": "Telegram", "discord": "Discord"}.get(kind, kind.title()),
+                     so.get("url"))
+        out["mcap"] = best.get("marketCap") or best.get("fdv")
+        if best.get("pairCreatedAt"):
+            out["age_days"] = (time.time() - best["pairCreatedAt"] / 1000) / 86400
+    if chain == "bsc":
+        fm = get_json(FOURMEME_API.format(token))
+        out["reached"] += fm is not None
+        data = fm.get("data") if isinstance(fm, dict) else None
+        if isinstance(data, dict):
+            out["desc"] = clean_text(data.get("descr") or data.get("description"))
+            if data.get("label"):
+                out["cats"].append(str(data["label"]))
+            add_link("Website", data.get("webUrl"))
+            add_link("X", data.get("twitterUrl"))
+            add_link("Telegram", data.get("telegramUrl"))
+    cg = get_json(f"https://api.coingecko.com/api/v3/coins/{CG_PLATFORM[chain]}/contract/{token}")
+    out["reached"] += cg is not None
+    if isinstance(cg, dict) and cg.get("id"):
+        out["desc"] = out["desc"] or clean_text((cg.get("description") or {}).get("en"))
+        out["cats"] += [c for c in cg.get("categories") or [] if c and c not in out["cats"]][:3]
+        links = cg.get("links") or {}
+        add_link("Website", next((u for u in links.get("homepage") or [] if u), None))
+        if links.get("twitter_screen_name"):
+            add_link("X", f"https://x.com/{links['twitter_screen_name']}")
+        add_link("Telegram", f"https://t.me/{links['telegram_channel_identifier']}"
+                 if links.get("telegram_channel_identifier") else None)
+    return out
+
+
+def known_buyers(buyers, labels):
+    """Pembeli yang dikenal dari labels.json / wallets.json (KOL, fund, exchange, dll.)."""
+    return list(dict.fromkeys(labels[b] for b in buyers if b in labels))
+
+
+def story_lines(chain, token, story, buyers, labels):
+    lines = []
+    narrative = story["desc"] or ""
+    cats = ", ".join(story["cats"][:3])
+    if narrative or cats:
+        lines.append(f"Narasi: {html.escape(narrative)}{' ' if narrative and cats else ''}"
+                     f"{f'[{html.escape(cats)}]' if cats else ''}")
+    elif story.get("reached"):
+        lines.append("Narasi: tidak ada deskripsi publik")
+    else:
+        lines.append("Narasi: sumber data (DexScreener/four.meme/CoinGecko) tidak bisa diakses")
+    facts = []
+    if story["mcap"]:
+        facts.append(f"Mcap {fmt_usd(story['mcap'])}")
+    if story["age_days"] is not None:
+        age = story["age_days"]
+        facts.append(f"pool umur {f'{age * 24:.0f} jam' if age < 1 else f'{age:.0f} hari'}")
+    links = " · ".join(link(name, url) for name, url in story["links"].items())
+    if links or facts:
+        lines.append(" · ".join(x for x in (links, " · ".join(facts)) if x))
+    elif story.get("reached"):
+        lines.append("⚠️ Tanpa website/sosial media")
+    known = known_buyers(buyers, labels)
+    if known:
+        lines.append("Dibeli oleh: " + html.escape(", ".join(known[:5]))
+                     + (f" +{len(known) - 5} lainnya" if len(known) > 5 else ""))
+    return lines
+
+
 # --- Top 5 (ringkasan per jam) ------------------------------------------------
 
 MIN_LIQUIDITY = 20_000   # USD sisi quote; di bawah ini terlalu tipis untuk dibeli/dijual
@@ -661,7 +771,8 @@ def top_tokens(chain, state, prices, now, n=5):
     return [r for r in sorted(rows, key=lambda r: -r["score"]) if r["score"] >= MIN_SCORE][:n]
 
 
-def top_text(chain, rows, meta):
+def top_text(chain, rows, meta, stories=None, labels=None):
+    stories, labels = stories or {}, labels or {}
     lines = [f"📊 <b>TOP {len(rows)} SINYAL AKUMULASI · {chain.upper()} · 24 jam</b>",
              "<i>Skor dari data on-chain, bukan saran investasi. Cek kontrak &amp; chart sebelum beli.</i>"]
     for i, r in enumerate(rows, 1):
@@ -673,6 +784,8 @@ def top_text(chain, rows, meta):
                   f"Volume beli {fmt_usd(r['buy'])} / jual {fmt_usd(r['sell'])} (net +{fmt_usd(r['net'])})",
                   f"{len(r['buyers'])} wallet pembeli{smart}",
                   f"Likuiditas {fmt_usd(r['liq'])}{mom}"]
+        if r["token"] in stories:
+            lines += story_lines(chain, r["token"], stories[r["token"]], r["buyers"], labels)
         lines += [f"⚠️ {w}" for w in r["warn"]]
         lines.append(html.escape(r["token"]))
     return "\n".join(lines)
@@ -688,8 +801,36 @@ def send_top(chain, state, prices, now, every_min):
         log(f"{chain}: top 5: belum ada token yang lolos syarat")
         return
     meta = token_meta(chain, [r["token"] for r in rows], state["tokens"].setdefault(chain, {}))
-    msg = top_text(chain, rows, meta)
+    stories = {r["token"]: token_story(chain, r["token"]) for r in rows}
+    msg = top_text(chain, rows, meta, stories, load_labels())
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {plain(msg)}\n", flush=True)
+    if not send_telegram(msg, preview=False, html=True) and os.environ.get("TELEGRAM_BOT_TOKEN"):
+        send_telegram(plain(msg), preview=False)
+
+
+def cmd_info(chain, token, state):
+    """Kirim narasi, link, aktivitas 24 jam & pembeli yang dikenal untuk satu token."""
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", token or ""):
+        sys.exit(f"Alamat token tidak valid: {token!r}")
+    token = token.lower()
+    meta = token_meta(chain, [token], state["tokens"].setdefault(chain, {}))
+    flows = [f for f in state.get("flows", {}).get(chain, []) if f[1] == token]
+    buyers = list(dict.fromkeys(f[2] for f in sorted(flows, key=lambda f: -f[3])))
+    vol = [0.0, 0.0]
+    for _, t, v_in, v_out in state.get("volume", {}).get(chain, []):
+        if t == token:
+            vol[0] += v_in
+            vol[1] += v_out
+    lines = [f"🔎 <b>INFO {link(meta[token][0], DEXSCREENER[chain] + token)}</b> · {chain.upper()}"]
+    lines += story_lines(chain, token, token_story(chain, token), buyers, load_labels())
+    if flows:
+        lines.append(f"24 jam (tercatat tool ini): beli {fmt_usd(sum(f[3] for f in flows))} dari "
+                     f"{len(buyers)} wallet · volume beli {fmt_usd(vol[0])} / jual {fmt_usd(vol[1])}")
+    else:
+        lines.append("24 jam: belum ada pembelian ≥ --track-usd yang tercatat")
+    lines.append(html.escape(token))
+    msg = "\n".join(lines)
+    print(plain(msg), flush=True)
     if not send_telegram(msg, preview=False, html=True) and os.environ.get("TELEGRAM_BOT_TOKEN"):
         send_telegram(plain(msg), preview=False)
 
@@ -771,6 +912,7 @@ def main():
     p.add_argument("--top-every", type=float, default=60,
                    help="kirim TOP 5 token tiap N menit (default 60; 0 = mati)")
     p.add_argument("--state", default=str(DEFAULT_STATE), help="file state (blok terakhir & cache pool)")
+    p.add_argument("--info", metavar="TOKEN", help="kirim narasi & info satu token (chain pertama di --chains) lalu keluar")
     args = p.parse_args()
     chains = [c.strip() for c in args.chains.split(",") if c.strip()]
     for c in chains:
@@ -778,6 +920,9 @@ def main():
             sys.exit(f"chain tidak didukung: {c} (pilihan: {', '.join(QUOTES)})")
     state_path = Path(args.state)
     state = load_state(state_path)
+    if args.info:
+        cmd_info(chains[0], args.info, state)
+        return
     print(f"Memantau beli >= {fmt_usd(args.min_usd)} di {', '.join(c.upper() for c in chains)}"
           f"{'' if args.once else f' tiap {args.interval}s'}. Ctrl+C untuk berhenti.", flush=True)
     while True:
