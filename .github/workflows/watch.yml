@@ -25,6 +25,9 @@ permissions:
 
 jobs:
   watch:
+    # BOT DIJEDA: run terjadwal / cron-job.org dilewati; hanya "Run workflow" dengan input token yang jalan.
+    # Untuk menyalakan lagi, hapus baris "if:" di bawah ini.
+    if: github.event_name == 'workflow_dispatch' && inputs.token != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -48,6 +51,8 @@ jobs:
       # Alert saldo whale (tracker.py) sengaja tidak dijadwalkan; jalankan manual bila perlu.
       # Wallet yang membeli token apa pun >= BIGBUY_MIN_USD di DEX BSC/ETH sejak run sebelumnya
       - name: Cek beli token besar
+        # Run cek info token tidak ikut memindai & mengirim alert beli
+        if: github.event_name != 'workflow_dispatch' || inputs.token == ''
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
